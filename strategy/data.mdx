@@ -12,7 +12,7 @@ Each month's `modules/backtest.module.ts` registers a custom exchange schema tha
 
 ```typescript
 addExchangeSchema({
-  exchangeName: 'yahoo-finance',
+  exchangeName: "yahoo-finance",
   getCandles: async (symbol, interval, since, limit) =>
     await getCandlesSampled(fetchOHLCV, { symbol, interval, since, limit }),
 });

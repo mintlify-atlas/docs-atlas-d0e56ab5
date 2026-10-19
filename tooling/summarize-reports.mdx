@@ -27,7 +27,7 @@ The report is a newline-delimited JSON file where each line has an `action` fiel
 
 ## Per-Month Output Columns
 
-```
+```text
 month    opened closed  net$     net%   fees$  gross%  PAXG$  gate      non-time closes
 2020-09     21     21    +42   +4.2%     18    +5.9%    +12  0.33..0.67
 ```
@@ -49,7 +49,7 @@ month    opened closed  net$     net%   fees$  gross%  PAXG$  gate      non-time
 
 After the month table, the script prints a year-level aggregate:
 
-```
+```text
 year   months trades    net$    net%   fees$  gross%
 2020       4    336     +80   +8.0%     42    +12.2%
 2021      12   1212    +230  +23.0%    130    +36.0%
@@ -61,13 +61,13 @@ Each row sums `net$`, `fees$`, and trade count across all months of that year.
 
 The final summary row covers all months:
 
-```
+```text
 TOTAL    73   5400   +1840  +184.0%   920   +276.0%   (6.1 years: net 30.2%/y simple, gross 45.2%/y)
 ```
 
 Annualised figures are computed as simple (non-compounding) averages:
 
-```
+```text
 annualised net%  = total net$  / deposit / years × 100
 annualised gross% = (total net$ + total fees$) / deposit / years × 100
 ```
@@ -78,7 +78,7 @@ where `years = number of months / 12`.
 
 After the table, the script prints a timeline-based cumulative equity line. All closed signals across all months are sorted by `closeTime` and replayed in order against the starting deposit:
 
-```
+```text
 cumulative P&L: final 2840, peak 3100, max drawdown -260$ (-8% of peak) at 2022-11-14
 ```
 
@@ -105,7 +105,7 @@ The summary flags this inline as `OPEN!=CLOSED`.
 
 Every trade in this strategy is expected to exit as `time_expired` (the weekly time limit). If any `closeReason` other than `time_expired` appears, it means a stop or take-profit was hit — which at −50% / +500% levels should be impossible on spot in one week under normal conditions. These are printed in the `non-time closes` column and listed individually at the end of the output:
 
-```
+```text
 3 closes not by time (check the data behind them):
   2021-05 BTCUSDT       stop_loss     pnl  -51.2%  open 58000.0 close 28000.0
 ```

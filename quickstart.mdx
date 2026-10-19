@@ -1,5 +1,5 @@
 ---
-title: "Get Started with Backtest Index Fund in Minutes"
+title: "Quickstart: Install, Start Docker, and Run a Backtest"
 sidebarTitle: "Quickstart"
 description: "Install Node.js dependencies, start MongoDB and Redis with Docker Compose, then run your first monthly backtest or replay all 73 months in sequence."
 ---
@@ -66,7 +66,7 @@ Flag breakdown:
 | Flag | Effect |
 |---|---|
 | `--backtest` | Runs the engine in backtest mode: positions are simulated against historical candles fetched from Yahoo Finance, not a live exchange. |
-| `--ui` | Serves a local browser UI (typically at `http://localhost:3000`) where you can watch signals and equity update in real time as the engine steps through the month. Omit for headless runs. |
+| `--ui` | Serves a local browser UI where you can watch signals and equity update in real time as the engine steps through the month. Omit for headless runs. |
 | `--entry` | Path to the strategy file to execute. Each month folder is fully self-contained, so this single flag is all that changes between months. |
 
 The engine steps through the month one day at a time (`CC_BACKTEST_STEP_MINUTES: 1440` is set inside the strategy). Each weekly position opens with `Position.bracket`, holds for `HOLD_MINUTES` (one week minus one minute), and closes by `time_expired`. When the month's frame ends the process calls `kill()` and exits with a non-zero code — this is expected and normal.
@@ -115,9 +115,9 @@ This scans every `content/*/dump/report/backtest.jsonl` file and prints a consol
 | `net$` | Net P&L in USD across all symbols for the month |
 | `net%` | Net return as a percentage of total deployed capital |
 | `fees$` | Engine-estimated trading costs for the month |
-| `gross%` | Gross return before fees |
+| `gross%` | Gross return (net P&L plus estimated round-trip fees added back) |
 | `PAXG$` | P&L contribution from the PAXG (gold) counter-position |
-| `gate range` | Min–max gate value observed during the month (0 = fully in gold, 1 = fully in alts) |
+| `gate` | Min–max gate value observed during the month, formatted as `min..max` (0 = fully in gold, 1 = fully in alts) |
 | `non-time closes` | Count of positions that did **not** close via `time_expired` — each one is worth investigating for data issues |
 
 The script also prints a cumulative P&L and drawdown summary across all months.
@@ -128,12 +128,12 @@ The script also prints a cumulative P&L and drawdown summary across all months.
 
 ## What to Look for in the Report
 
-Each month's report is at `content/<month>/dump/report/backtest.jsonl`. Every line is a JSON object with a `type` field:
+Each month's report is at `content/<month>/dump/report/backtest.jsonl`. Every line is a JSON object with a top-level `symbol` and a `data` object whose `action` field identifies the row type:
 
 ```jsonl
-{"type":"opened","symbol":"BTCUSDT","time":1598918400000,"cost":46.3, ...,"payload":{"gate":0.5,"weight":0.0463,"basketSize":21}}
-{"type":"active","symbol":"BTCUSDT","time":1599004800000, ...}
-{"type":"closed","symbol":"BTCUSDT","time":1599523140000,"closeReason":"time_expired","pnlCost":2.14, ...}
+{"symbol":"BTCUSDT","data":{"action":"opened","cost":46.3,"time":1598918400000,...,"payload":{"gate":0.5,"weight":0.0463,"basketSize":20}}}
+{"symbol":"BTCUSDT","data":{"action":"active","time":1599004800000,...}}
+{"symbol":"BTCUSDT","data":{"action":"closed","closeReason":"time_expired","pnlCost":2.14,...}}
 ```
 
 Key things to check:
@@ -141,8 +141,8 @@ Key things to check:
 - **`closeReason: "time_expired"`** is the normal, expected exit. Every position is designed to run for exactly one week and close on the time limit. Any other close reason (stop-loss, take-profit, or manual) indicates an unusual data event and should be investigated.
 - **`payload` on `opened` rows** carries three fields that describe the market state at entry:
   - `gate` — the Bitcoin trend gate value (0–1) at the moment the position was opened. This determines how much of the deposit is in alts vs. PAXG that week.
-  - `weight` — the fraction of `DEPOSIT_USD` allocated to this specific symbol (`gate / basketSize` for basket symbols, `1 − gate` for PAXG).
-  - `basketSize` — the total number of symbols in the basket for that month (20 alts + PAXG = 21).
+  - `weight` — the fraction of `DEPOSIT_USD` allocated to this symbol: `gate / basketSize` for each alt in the basket, `1 − gate` for PAXG.
+  - `basketSize` — the number of alt symbols in the basket for that month (20). PAXG is tracked separately as the counter-position and is not counted in `basketSize`.
 - **`pnlCost` on `closed` rows** is the realized P&L for that position in USD. Sum these across a month to get the net result, or use `summarize_reports.mjs` to do it automatically.
 
 <Note>

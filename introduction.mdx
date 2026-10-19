@@ -1,7 +1,7 @@
 ---
 title: "Backtest Index Fund: Weekly Crypto Index on backtest-kit"
 sidebarTitle: "Introduction"
-description: "Backtest Index Fund simulates a weekly top-20 Binance USDT pair basket with a Bitcoin trend gate and PAXG counter-position, replayed month by month from 2020."
+description: "Simulates a weekly top-20 Binance USDT basket with a Bitcoin trend gate and PAXG counter-position, replayed month by month since September 2020."
 ---
 
 Backtest Index Fund is a research-grade crypto index fund simulator built on top of [backtest-kit](https://github.com/tripolskypetr/backtest-kit). It answers two questions that are easy to hand-wave in a spreadsheet but impossible to ignore in an engine: **which coins were actually in the index on a given month** (not the survivors visible today), and **what happens to the capital when the index is not worth holding**. Every month from September 2020 onward is replayed with the basket that was knowable before that month began, with a Bitcoin trend gate scaling exposure from 0 to 1, and with the idle portion of the deposit parked in tokenized gold (PAXG). The project is aimed at quantitative researchers who want a reproducible, honest record of a rules-based crypto allocation, and at developers building their own strategies on backtest-kit who need a non-trivial reference to study.
@@ -95,12 +95,37 @@ The engine requires **MongoDB** and **Redis** to be reachable before any strateg
 
 ```yaml
 # docker/mongo/docker-compose.yaml
-# Starts mongodb on port 27017 with a persistent volume at ./mongo_data
+version: '3.8'
+services:
+  mongodb:
+    image: mongodb/mongodb-community-server:8.0.4-ubi8
+    container_name: mongodb
+    ports:
+      - '27017:27017'
+    volumes:
+      - ./mongo_data:/data/db
+    restart: always
+volumes:
+  mongo_data:
 ```
 
 ```yaml
 # docker/redis/docker-compose.yaml
-# Starts redis:7.4.1 on port 6379 with password protection (CC_REDIS_PASSWORD in .env)
+version: '3.8'
+services:
+  redis:
+    image: redis:7.4.1
+    container_name: redis
+    ports:
+      - "6379:6379"
+    environment:
+      - REDIS_PASSWORD=mysecurepassword
+    command: ["redis-server", "--requirepass", "mysecurepassword"]
+    volumes:
+      - ./redis_data:/data
+    restart: always
+volumes:
+  redis_data:
 ```
 
 `config/loader.config.ts` calls `waitForInit()` from `@backtest-kit/mongo` as its default export. The CLI blocks strategy loading until this promise resolves, so a missing database produces a clear timeout rather than a cryptic runtime error.

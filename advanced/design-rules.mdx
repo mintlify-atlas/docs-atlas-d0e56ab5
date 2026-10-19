@@ -1,7 +1,7 @@
 ---
-title: "Design Rules and Architecture Principles"
+title: "Design Rules, Architecture, and Reproducibility Guarantees"
 sidebarTitle: "Design Rules"
-description: "The five explicit design rules that govern the repo: copy-paste over abstraction, setConfig only in strategy, constants over tuning, and reproducibility guarantees."
+description: "The five design rules: copy-paste over abstraction, setConfig only in strategy files, constants over tuning, and writing down every approximation."
 ---
 
 These rules are not stylistic preferences. They are enforced by structure and exist to protect reproducibility: the requirement that any month folder, run in isolation today, produces the same result it produced the day it was first run. Violating a rule does not produce a compile error — it produces a backtest that silently produces different numbers than the original.
@@ -30,17 +30,15 @@ Each `content/<month>/` folder contains its own copy of:
 
 </Accordion>
 
-<Accordion title="Rule 2: setConfig only in the strategy file">
+<Accordion title="Rule 2: setConfig is not called from the exchange module">
 
-`setConfig` appears **only** in `main.strategy.ts`. No other file in the folder calls it.
+Within each content folder, `setConfig` appears only in `main.strategy.ts`. The exchange module (`modules/backtest.module.ts`) registers schemas and adapters — `addExchangeSchema`, `addFrameSchema`, `PersistCandleAdapter.useDummy()` — but it does not call `setConfig` or change engine behaviour directly.
 
-The exchange module (`modules/backtest.module.ts`) registers schemas and adapters — `addExchangeSchema`, `addFrameSchema`, `PersistCandleAdapter.useDummy()` — but it does not change engine behaviour. It does not call `setConfig`.
-
-The global persistence configuration in `config/setup.config.ts` sets choices like Dump, Session, and Storage adapters but does not call `setConfig` either.
+The global launcher config (`config/loader.config.ts`) does call `setConfig` once, setting `CC_LAUNCHER_CANDLE_CACHE_DEFAULT: false`. The rule is specifically that the **exchange module** must not call `setConfig`, so that each strategy file is the single authoritative source of engine configuration for its month.
 
 **Why this matters:**
 
-When reading a month's strategy file to understand its behaviour, you can read its `setConfig` call and know with certainty what the engine was configured to do. If `setConfig` could be called from anywhere in the module graph, you would need to trace all imports to find the effective configuration. For a 73-folder repo, that becomes unmanageable.
+When reading a month's strategy file to understand its behaviour, you can read its `setConfig` call and know what the engine was configured to do for that folder. If `setConfig` could be called from the exchange module, you would need to trace all imports to find the effective configuration — for a 73-folder repo that becomes unmanageable.
 
 **From `content/apr_2021/main.strategy.ts`:**
 
@@ -51,7 +49,7 @@ setConfig({
 });
 ```
 
-This is the only `setConfig` call in the entire folder.
+The exchange module for the same month (`modules/backtest.module.ts`) contains no `setConfig` call — only `addExchangeSchema`, `addFrameSchema`, and `PersistCandleAdapter.useDummy()`.
 
 </Accordion>
 

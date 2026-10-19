@@ -1,7 +1,7 @@
 ---
-title: "How the Weekly Index Fund Strategy Works"
+title: "Weekly Crypto Index Fund: Strategy Architecture Overview"
 sidebarTitle: "Overview"
-description: "A complete walkthrough of the index fund strategy: basket selection, BTC trend gate, PAXG counter-position, weekly cycle, and the one-folder-per-month architecture."
+description: "A walkthrough of basket selection, the BTC trend gate, PAXG parking, the weekly position cycle, and the one-folder-per-month architecture."
 ---
 
 The strategy backtests a weekly long-only crypto index fund across every month from September 2020 onward. A fixed deposit of $1,000 is split equally across up to twenty of the most-traded Binance USDT pairs of the prior calendar month. A BTC-based trend gate then scales that split: when Bitcoin momentum is strong the full deposit goes into crypto; as it weakens, the unallocated fraction moves into tokenized gold (PAXG). Every position lives exactly one week, closes by time expiry, and is immediately reopened on the next tick at whatever size the gate dictates that day. The whole strategy lives in one self-contained TypeScript file per month — there is no shared code between months and no look-ahead into data that was not available on the first day of the month.
@@ -59,13 +59,13 @@ const DEPOSIT_USD = 1000;
 
 The $1,000 deposit is split at the start of each weekly position according to the gate value computed that day. Each basket symbol receives:
 
-```
+```typescript
 cost = (DEPOSIT_USD / BASKET.length) * gate
 ```
 
 PAXG, the parking symbol, receives the complementary fraction:
 
-```
+```typescript
 cost = DEPOSIT_USD * (1 - gate)
 ```
 
@@ -76,7 +76,7 @@ When the gate is 1 (all six BTC windows are up), every dollar goes into crypto a
 Every opened signal carries a structured `payload` field so the report is self-documenting:
 
 ```typescript
-payload: { gate, weight, basketSize: BASKET.length }
+payload: { gate, weight: cost / DEPOSIT_USD, basketSize: BASKET.length }
 ```
 
 | Field | Description |
@@ -87,7 +87,7 @@ payload: { gate, weight, basketSize: BASKET.length }
 
 The human-readable `note` field on the signal records the same information in one line:
 
-```
+```text
 BTCUSDT gate=0.83 cost=$41.67
 ```
 

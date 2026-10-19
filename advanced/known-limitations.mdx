@@ -1,7 +1,7 @@
 ---
-title: "Known Approximations and Trade-offs"
+title: "Known Approximations, Trade-offs, and Simulation Gaps"
 sidebarTitle: "Known Limitations"
-description: "All documented approximations in the backtest: daily-bar intraday path, per-symbol portfolio accounting, leg desynchronisation, and Yahoo aggregate prices."
+description: "Every documented approximation: daily-bar sampling, per-symbol accounting, leg desynchronisation, Yahoo data quality issues, and the fixed deposit model."
 ---
 
 Every approximation in this repository is documented here. This list is sourced from `docs/HOWTO.md`, the operating manual that accompanies the codebase. None of these approximations affect weekly time-exit results in a material way — the strategy was designed around them. They would, however, affect intraday stop strategies, compounding strategies, or any analysis that treats the simulation output as a precise tick-by-tick replay of market events.

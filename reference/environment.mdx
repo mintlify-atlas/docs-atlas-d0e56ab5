@@ -1,5 +1,5 @@
 ---
-title: "Environment Variables and Docker Setup"
+title: "Environment Variables and Docker Compose Setup"
 sidebarTitle: "Environment"
 description: "Required environment variables for Redis authentication and Docker Compose configuration for the MongoDB and Redis persistence services."
 ---
@@ -9,18 +9,18 @@ The backtest-kit engine requires both MongoDB and Redis to be reachable before a
 ## Environment variables
 
 <ParamField query="CC_REDIS_PASSWORD" type="string" required>
-  The password used to authenticate with Redis. Must exactly match the value of `requirepass` in the Redis service definition inside `docker/redis/docker-compose.yaml`. The engine reads this variable when `config/loader.config.ts` establishes the Redis connection. If the variable is absent or mismatched, the connection will be refused and the strategy will not load.
+  The password used by the engine to authenticate with Redis. Must exactly match the value passed to `--requirepass` in the Redis service command inside `docker/redis/docker-compose.yaml`. The engine reads this variable when `config/loader.config.ts` establishes the Redis connection. If the variable is absent or mismatched, the connection will be refused and the strategy will not load.
 </ParamField>
 
 ## .env file setup
 
 Create a `.env` file at the project root before starting any services:
 
-```bash .env
+```bash
 CC_REDIS_PASSWORD=your_redis_password_here
 ```
 
-`config/loader.config.ts` reads this variable when connecting to Redis. The value must match the `requirepass` argument in `docker/redis/docker-compose.yaml` — if you change the password in the compose file, update `.env` to match, then restart the Redis container.
+`config/loader.config.ts` reads this variable when connecting to Redis. The value must match the `--requirepass` argument in `docker/redis/docker-compose.yaml` — if you change the password in the compose file, update `.env` to match, then restart the Redis container.
 
 ## MongoDB Docker Compose
 
@@ -48,7 +48,7 @@ This starts Redis 7.4.1 on port `6379` with a persistent volume at `docker/redis
 - **Caching** — inter-tick caches (including `Cache.fn` results from the gate computation) are backed by Redis.
 - **Inter-process coordination** — the launcher uses Redis to coordinate state between the engine process and any auxiliary processes.
 
-The password set in the compose file must match `CC_REDIS_PASSWORD` in your `.env` file. The default value in the shipped compose file is `mysecurepassword` — change it in both places before deploying anywhere beyond a local machine.
+The password set via `--requirepass` in the compose file must match `CC_REDIS_PASSWORD` in your `.env` file. The default value in the shipped compose file is `mysecurepassword` — change it in both places before deploying anywhere beyond a local machine.
 
 ## Startup order
 
@@ -72,6 +72,8 @@ npm start -- --backtest --entry ./content/apr_2021/main.strategy.ts
 |-----------|-------------|-----------------|
 | `Session` | `SessionLive.usePersist()` | `SessionBacktest.useLocal()` |
 | `Storage` | `StorageLive.usePersist()` | `StorageBacktest.useMemory()` |
+| `Recent` | `RecentLive.usePersist()` | `RecentBacktest.useMemory()` |
+| `Notification` | `NotificationLive.usePersist()` | `NotificationBacktest.useMemory()` |
 | `Memory` | `MemoryLive.usePersist()` | `MemoryBacktest.useLocal()` |
 | `State` | `StateLive.usePersist()` | `StateBacktest.useLocal()` |
 | `Log` | `Log.useJsonl()` | `Log.useJsonl()` |

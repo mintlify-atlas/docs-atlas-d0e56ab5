@@ -1,5 +1,5 @@
 ---
-title: "setConfig: Engine Configuration Options"
+title: "setConfig: Backtest Engine Configuration Keys"
 sidebarTitle: "setConfig"
 description: "All setConfig keys used in the index fund strategy and their effect on backtest-kit engine behavior, from step size to anomaly thresholds."
 ---
@@ -35,8 +35,8 @@ setConfig({
 These keys are not set in the default `setConfig` call but appear in supporting files or are documented in `docs/HOWTO.md`. They can be added to the `setConfig` call in `main.strategy.ts` to override engine defaults.
 
 | Key | Type | Default | Purpose |
-|-----|------|---------|---------|
-| `CC_LAUNCHER_CANDLE_CACHE_DEFAULT` | `boolean` | `true` | Whether to cache candles between launcher runs. Set to `false` in `config/loader.config.ts` so that every strategy run fetches fresh candles rather than reusing a stale cache from a previous process. |
+|-----|------|---------|---------| 
+| `CC_LAUNCHER_CANDLE_CACHE_DEFAULT` | `boolean` | engine default | Whether to cache candles between launcher runs. Set to `false` in `config/loader.config.ts` so that every strategy run fetches fresh candles rather than reusing a stale cache from a previous process. |
 | `CC_GET_CANDLES_PRICE_ANOMALY_THRESHOLD_FACTOR` | `number` | engine default | Multiplier threshold for detecting anomalous bars — zeros and hundredfold wicks in the Yahoo daily feed. Bars that exceed the threshold are repaired by `getCandlesFilled` with a flat bar derived from neighbouring closes. |
 | `CC_GET_CANDLES_MAX_ANOMALY_STREAK` | `number` | engine default | Maximum number of consecutive anomalous bars the repair algorithm will fix before giving up and leaving the gap unrepaired. Relevant when a ticker has a prolonged data outage on Yahoo. |
 | `CC_PERCENT_FEE` | `number` | `0.001` (0.1%) | Taker fee applied per trade side. Not overridden in the strategy; used by `scripts/common/summarize_reports.mjs` to compute estimated round-trip costs alongside realized PnL. |

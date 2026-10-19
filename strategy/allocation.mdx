@@ -1,7 +1,7 @@
 ---
 title: "Deposit Allocation: Basket Weighting and Gold Parking"
 sidebarTitle: "Allocation"
-description: "Equal-weight basket allocation scaled by the BTC gate, with PAXG receiving the unallocated fraction — the deposit is never idle."
+description: "Equal-weight basket allocation scaled by the BTC gate, with PAXG receiving the unallocated fraction — the deposit is never left idle."
 ---
 
 The allocation model has one job: make sure every dollar of the $1,000 deposit is put to work every week, split between the crypto basket and gold in a ratio dictated by the BTC trend gate. There is no cash. When Bitcoin momentum is absent the full deposit parks in gold; when momentum is strong the full deposit goes into crypto; at intermediate gate values the two legs share the deposit proportionally. The arithmetic is intentionally simple — a single multiply per symbol — so the mechanism is fully transparent from the report's `payload` fields.

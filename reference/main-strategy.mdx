@@ -1,6 +1,6 @@
 ---
 title: "main.strategy.ts: Fund Logic and Signal Generation"
-sidebarTitle: "main.strategy.ts"
+sidebarTitle: "Main Strategy"
 description: "Reference for all constants, the getGate function, the getSignal handler, and the launcher registration in each month's main.strategy.ts file."
 ---
 
@@ -58,7 +58,7 @@ const getGate = Cache.fn(async (): Promise<number> => {
 | `candles.map(({ close }) => close)` | Extracts only closing prices into a flat array. |
 | `const last = closes[closes.length - 1]` | The most recent closed price (yesterday relative to the strategy tick). |
 | `GATE_WINDOWS_DAYS.filter((days) => last > closes[closes.length - 1 - days]).length` | For each window N, checks whether yesterday's close is higher than the close N days earlier — i.e., whether BTC is in an uptrend over that horizon. Counts how many windows vote "yes". |
-| `return up / GATE_WINDOWS_DAYS.length` | Normalises the vote count to a fraction in `[0, ⅙, ⅔, ½, ⅔, ⅚, 1]`. This is the gate: the share of the deposit that flows into the basket this week. |
+| `return up / GATE_WINDOWS_DAYS.length` | Normalises the vote count to a fraction in `[0, ⅙, ⅓, ½, ⅔, ⅚, 1]`. This is the gate: the share of the deposit that flows into the basket this week. |
 
 ---
 
@@ -122,7 +122,12 @@ getSignal: async (symbol, when, currentPrice) => {
 {
   id: `${symbol.toLowerCase()}-${when.toISOString().slice(0, 10)}`,
   symbol,
-  ...Position.bracket({ position: 'long', currentPrice, percentStopLoss, percentTakeProfit }),
+  ...Position.bracket({
+    position: "long",
+    currentPrice,
+    percentStopLoss: STOP_LOSS_PERCENT,
+    percentTakeProfit: TAKE_PROFIT_PERCENT,
+  }),
   cost: Math.round(cost * 100) / 100,
   minuteEstimatedTime: HOLD_MINUTES,
   payload: { gate, weight: cost / DEPOSIT_USD, basketSize: BASKET.length },
@@ -166,37 +171,6 @@ getSignal: async (symbol, when, currentPrice) => {
 
 ---
 
-## `addLauncherSchema` — launcher registration
-
-```typescript
-const SYMBOL_LIST = [...BASKET, PARKING_SYMBOL];
-
-addLauncherSchema({
-  launcherName: 'main_launcher',
-  backtest: true,
-  symbolList: SYMBOL_LIST,
-  cache: false,
-});
-```
-
-<ResponseField name="launcherName" type="string">
-  Identifier for this launcher instance: `'main_launcher'`.
-</ResponseField>
-
-<ResponseField name="backtest" type="boolean">
-  Set to `true` to run in backtest mode. The engine will replay the frame's historical date range rather than connecting to a live feed.
-</ResponseField>
-
-<ResponseField name="symbolList" type="string[]">
-  The full list of symbols the launcher subscribes to: all 20 basket symbols plus `PARKING_SYMBOL` (`"PAXGUSDT"`). Constructed as `[...BASKET, PARKING_SYMBOL]`.
-</ResponseField>
-
-<ResponseField name="cache" type="boolean">
-  Set to `false`. Candle caching is disabled because the Yahoo adapter synthesizes candles from memory on each run; there is nothing to persist or retrieve from cache.
-</ResponseField>
-
----
-
 ## `listenDoneBacktest` — shutdown mechanism
 
 ```typescript
@@ -215,3 +189,32 @@ listenDoneBacktest(() => {
 The strategy keeps a simple counter (`doneCount`). Each callback increments it; when the count reaches `SYMBOL_LIST.length` (21 symbols: 20 basket + 1 parking), `kill()` is called to shut down the engine process. This prevents early exit if a faster symbol completes before a slower one, and avoids hanging indefinitely if `kill()` were never called.
 
 `kill` is declared with `declare var kill: any` — it is injected into the module scope by the engine's runner at startup.
+
+---
+
+## `addLauncherSchema` — launcher registration
+
+```typescript
+addLauncherSchema({
+  launcherName: "main_launcher",
+  backtest: true,
+  symbolList: SYMBOL_LIST,
+  cache: false,
+})
+```
+
+<ResponseField name="launcherName" type="string">
+  Identifier for this launcher instance: `"main_launcher"`.
+</ResponseField>
+
+<ResponseField name="backtest" type="boolean">
+  Set to `true` to run in backtest mode. The engine will replay the frame's historical date range rather than connecting to a live feed.
+</ResponseField>
+
+<ResponseField name="symbolList" type="string[]">
+  The full list of symbols the launcher subscribes to: all 20 basket symbols plus `PARKING_SYMBOL` (`"PAXGUSDT"`). Constructed as `[...BASKET, PARKING_SYMBOL]`.
+</ResponseField>
+
+<ResponseField name="cache" type="boolean">
+  Set to `false`. Candle caching is disabled because the Yahoo adapter synthesizes candles from memory on each run; there is nothing to persist or retrieve from cache.
+</ResponseField>

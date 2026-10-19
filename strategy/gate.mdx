@@ -1,5 +1,5 @@
 ---
-title: "BTC Trend Gate: Ensemble Momentum Signal"
+title: "BTC Trend Gate: Six-Window Ensemble Momentum Signal"
 sidebarTitle: "BTC Gate"
 description: "The BTC trend gate votes across six lookback windows (20–45 days) to produce a 0–1 basket exposure fraction, eliminating single-parameter sensitivity."
 ---
@@ -14,12 +14,12 @@ The gate is computed by `getGate`, a cached async function that runs once per da
 const GATE_WINDOWS_DAYS = [20, 25, 30, 35, 40, 45];
 
 const getGate = Cache.fn(async (): Promise<number> => {
-  const candles = await getCandles(GATE_SYMBOL, '1d', Math.max(...GATE_WINDOWS_DAYS) + 1);
+  const candles = await getCandles(GATE_SYMBOL, "1d", Math.max(...GATE_WINDOWS_DAYS) + 1);
   const closes = candles.map(({ close }) => close);
   const last = closes[closes.length - 1];
   const up = GATE_WINDOWS_DAYS.filter((days) => last > closes[closes.length - 1 - days]).length;
   return up / GATE_WINDOWS_DAYS.length;
-}, { interval: '1d' });
+}, { interval: "1d" });
 ```
 
 Walking through each line:

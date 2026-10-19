@@ -1,6 +1,6 @@
 ---
-title: "YahooFinance Class: Daily Candle Fetcher"
-sidebarTitle: "YahooFinanceUtils"
+title: "YahooFinanceUtils: Keyless Daily OHLCV from Yahoo Finance"
+sidebarTitle: "Yahoo Finance"
 description: "API reference for the YahooFinanceUtils class: fetching and memoizing 15-year daily OHLCV history from Yahoo Finance chart API without an API key."
 ---
 
@@ -75,7 +75,7 @@ The public API. Filters the full memoized history to the requested window and re
 
 <ParamField path="interval" type="string" required>
   The candle interval. **Must be `'1d'`**. Any other value causes an immediate error:
-  ```
+  ```text
   Error: YahooFinance: only 1d interval is supported, got <interval>
   ```
   Yahoo Finance does not provide intraday bars beyond the last 60 days; this class makes no attempt to fetch them.
@@ -121,7 +121,7 @@ private fetchAll = memoize(
 
 ### Request URL
 
-```
+```text
 https://{host}.finance.yahoo.com/v8/finance/chart/{ticker}?range=15y&interval=1d&events=none
 ```
 
@@ -162,7 +162,7 @@ Bars are collected into a `Map<number, TRawCandle>` keyed by the normalised day 
 ### Console logging
 
 On a successful fetch, the method logs:
-```
+```text
 YahooFinance <ticker>: <N> daily bars YYYY-MM-DD .. YYYY-MM-DD
 ```
 
@@ -186,12 +186,12 @@ On a `429` response:
 4. The next attempt uses the other Yahoo host.
 
 On any non-429 HTTP error, the method throws immediately without retrying:
-```
+```text
 Error: YahooFinance <ticker>: HTTP <status>
 ```
 
 After all 6 attempts are exhausted without a successful response, the method throws:
-```
+```text
 Error: YahooFinance <ticker>: no response after 6 attempts
 ```
 

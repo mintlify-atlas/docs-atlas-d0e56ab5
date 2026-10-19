@@ -1,7 +1,7 @@
 ---
 title: "generate_months.mjs: Stamp All Month Folders from Reference"
 sidebarTitle: "Generate Months"
-description: "Copies the reference month folder into every month in universe.json, substituting the basket, ticker overrides, and frame — and rewrites the runner scripts."
+description: "Copies the reference folder into every month in universe.json, substituting the basket, ticker overrides, and frame, then rewrites the runner scripts."
 ---
 
 `generate_months.mjs` is the final step before running the backtest. It reads `scripts/common/universe.json` and produces one self-contained `content/<mon>_<yyyy>/` folder for every month in the file. Each folder is a copy of a single reference month with exactly three targeted substitutions: the coin basket, the Yahoo ticker overrides for those coins, and the calendar frame. The copy-paste model is deliberate — each month folder must be reproducible and independent, so a future refactor of shared code can never silently change a result that has already run.
