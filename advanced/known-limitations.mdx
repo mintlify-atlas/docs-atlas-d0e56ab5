@@ -1,0 +1,122 @@
+---
+title: "Known Approximations and Trade-offs"
+sidebarTitle: "Known Limitations"
+description: "All documented approximations in the backtest: daily-bar intraday path, per-symbol portfolio accounting, leg desynchronisation, and Yahoo aggregate prices."
+---
+
+Every approximation in this repository is documented here. This list is sourced from `docs/HOWTO.md`, the operating manual that accompanies the codebase. None of these approximations affect weekly time-exit results in a material way — the strategy was designed around them. They would, however, affect intraday stop strategies, compounding strategies, or any analysis that treats the simulation output as a precise tick-by-tick replay of market events.
+
+<AccordionGroup>
+
+<Accordion title="1. Daily-bar sampling intraday path">
+
+The engine simulates positions on minute candles. Yahoo Finance only provides daily bars. The adapter bridges this gap using `getCandlesSampled`, which copies the daily bar's high, low, and close into every minute of that day.
+
+**The consequence:** At the start of any given day, the engine already "knows" the day's eventual high and low — because every minute of that day carries the same values. There is no intraday price discovery in the simulation.
+
+**Why it does not affect this strategy:**
+
+- Every position is exited by time after exactly one week (`closeReason: "time_expired"`). The exit price is the close of the final daily bar, which is the same regardless of which minute within that day the exit is evaluated.
+- The technical stop loss (−50%) and take profit (+500%) are set at distances that a spot position cannot reach in one week. They are never triggered in normal operation.
+- `CC_BACKTEST_STEP_MINUTES: 24 * 60` is set in every strategy, so the engine evaluates positions once per day rather than 1 440 times on identical candles.
+
+**Why it would affect other strategies:**
+
+Any strategy that places intraday stops would see incorrect stop-outs. If you set a stop at −5% and a day's bar has a low of −6%, the engine would trigger the stop at the very first minute of that day — even if, in reality, the low occurred at 23:00 and a 09:00 stop would have been fine.
+
+</Accordion>
+
+<Accordion title="2. Per-symbol portfolio accounting">
+
+`backtest-kit` runs each symbol as an independent backtest with its own internal balance tracked via the `cost` field of each signal. There is no shared portfolio balance across symbols.
+
+**How the "fund" result is constructed:**
+
+- Each basket symbol is given `cost = (DEPOSIT_USD / BASKET.length) × gate`
+- PAXG is given `cost = DEPOSIT_USD × (1 − gate)`
+- The "fund" PnL for a month is the arithmetic sum of `pnlCost` values across all symbols in the report
+
+**Implication — no compounding within a position:**
+
+If Bitcoin rises 50% during a week, the BTC position does not increase in dollar terms. It remains at its initial `cost`. The simulation does not rebalance intra-week. This matches a fixed-notional execution model (e.g., a position opened with a fixed dollar amount), not a mark-to-market model.
+
+**Implication — zero cost is not the same as no signal:**
+
+The engine silently replaces a `cost` of `0` with its default entry cost (`CC_POSITION_ENTRY_COST`). When the gate is 0, returning a signal with `cost: 0` would result in an unintended entry. The strategy handles this by returning `null` instead of a signal whenever `cost < 1`:
+
+```typescript
+if (cost < 1) {
+  return null;
+}
+```
+
+This is why a gate of exactly 0 produces no basket signals at all, rather than signals with zero cost.
+
+</Accordion>
+
+<Accordion title="3. Weekly leg desynchronisation">
+
+The gold leg (`PAXGUSDT`) and the basket legs enter and exit independently. Each symbol opens its first position on the first available tick after the frame start, and then re-enters every week from that anchor point.
+
+**What happens when the gate changes:**
+
+After the first week in which the gate changes value, the gold leg and the basket legs end their current week at different times — because they were last opened at different ticks. From that point on, their weekly cycles are offset. There can be brief periods where a closing position from one week and an opening position from the next week overlap in wall-clock time.
+
+**Practical effect:**
+
+The full deposit is not always exactly allocated at every moment. The total exposure (basket + gold) may briefly exceed `DEPOSIT_USD` or fall short of it during the transition minutes between one week's closing tick and the next week's opening tick.
+
+**Two ways to eliminate this (from `docs/HOWTO.md`):**
+
+1. **Gate the re-entry signal on a shared clock.** Emit re-entry signals only on a fixed weekly anchor (e.g., Monday 00:00), regardless of when each symbol's previous position closed.
+2. **Align all exits to Monday 00:00.** Instead of a rolling `minuteEstimatedTime`, compute the exact minutes remaining until the next Monday midnight and use that as the hold duration.
+
+The repository ships the simpler version (rolling weekly hold) because the desynchronisation is small and documented rather than absent. The HOWTO describes both elimination approaches for users who need tight allocation control.
+
+</Accordion>
+
+<Accordion title="4. Yahoo Finance aggregate prices">
+
+The strategy fetches all candle data from the Yahoo Finance chart API — no API key, no ccxt, one HTTP request per ticker per run. Yahoo's prices are convenient but carry several known issues:
+
+**Adjusted prices:**
+
+Yahoo adjusts historical prices for stock splits and dividends. For equity-like instruments (TLT, SPX), this is desirable and standard. For crypto tokens on Yahoo, adjustments can introduce discontinuities that do not correspond to any event on-chain.
+
+**Token migrations:**
+
+When a token migrates to a new contract (e.g., DYDX in November 2023), Yahoo may show a price gap or a discontinuity at the migration date. The verify script (`scripts/common/verify_yahoo_tickers.mjs`) catches cases where Yahoo's close deviates significantly from Binance's close for the same month. Tickers that fail verification are written to `scripts/common/yahoo_tickers_rejected.json` with a reason, and the universe builder excludes them from affected months.
+
+**Ticker name collisions:**
+
+Some token symbols share a base currency name with a completely different asset. Historical examples include `APE-USD`, `ARB-USD`, and `TON-USD`, where the Yahoo ticker `BASE-USD` belonged to a different instrument at some point in history. The verify script detects these by comparing Yahoo closes to Binance closes month by month; affected tickers receive explicit overrides in `TICKER_OVERRIDES`.
+
+**Low-precision tickers:**
+
+Yahoo stores prices with seven significant digits. For tokens priced below 1×10⁻⁵ USD, this means the minimum representable price step is on the order of 12%. PEPE, for example, trades near 8×10⁻⁷ USD — a price step of roughly 1×10⁻⁷ corresponds to a 12% move. Returns computed from these prices are unreliable, and such tickers are excluded by the verify script.
+
+</Accordion>
+
+<Accordion title="5. Fixed deposit, no compounding">
+
+`DEPOSIT_USD = 1000` is a constant in every strategy file. Profits and losses from one week are not reinvested into the next week's positions.
+
+**What this means for reported results:**
+
+- `summarize_reports.mjs` computes **simple returns** across months, not compound returns.
+- Each month's `pnlCost` is expressed as a dollar amount on a fixed $1 000 base.
+- The cumulative P&L shown in the summary table is an additive sum, not a geometric series.
+
+**Why this is by design:**
+
+A fixed deposit makes each month's result directly comparable: a $50 gain in April 2021 and a $50 gain in January 2023 represent the same 5% return on the same base. Compounding would make later months larger in absolute dollar terms simply because the base is larger — conflating the strategy's directional performance with its path history.
+
+It also eliminates path dependency from the analysis: the result of any individual month is independent of whether the previous months were profitable.
+
+</Accordion>
+
+</AccordionGroup>
+
+<Info>
+Despite these approximations, the results are valid for evaluating the strategy's directional behavior and risk-adjusted characteristics over the 2020–2026 period. The approximations are consistent across all months — they do not introduce a bias that favors a particular period, and they do not affect the time-exit mechanism that drives the strategy's core logic.
+</Info>

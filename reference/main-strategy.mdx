@@ -1,0 +1,217 @@
+---
+title: "main.strategy.ts: Fund Logic and Signal Generation"
+sidebarTitle: "main.strategy.ts"
+description: "Reference for all constants, the getGate function, the getSignal handler, and the launcher registration in each month's main.strategy.ts file."
+---
+
+`main.strategy.ts` is the single file that defines fund behavior for a given month. It is the only file that differs between months (in the `BASKET` block) and the only file that calls `setConfig`. Every other month folder is a verbatim copy of the reference month with exactly the basket block, the ticker overrides, and the frame date substituted by the generator.
+
+---
+
+## Constants
+
+These constants are declared at the top of the file and never change between months (except indirectly through `BASKET`).
+
+| Constant | Value | Description |
+|---|---|---|
+| `DEPOSIT_USD` | `1000` | Total simulated deposit in USD. Divided equally among basket symbols; the remainder is directed to the parking symbol by the gate. |
+| `PARKING_SYMBOL` | `"PAXGUSDT"` | Symbol used to absorb the unallocated share of the deposit. Binance PAXG/USDT is tokenized gold and acts as the counter-position when the gate is below 1. |
+| `HOLD_MINUTES` | `7 * 24 * 60 - 1` | Position hold time in minutes: exactly one week minus one minute. Positions close at 23:59 on the seventh day; re-entry fires on the next hourly tick at 00:00 without an extra hour sitting in the candle cache. |
+| `GATE_SYMBOL` | `"BTCUSDT"` | Symbol used for the trend gate calculation. BTC's daily closed bars are the input to the ensemble lookback vote. |
+| `GATE_WINDOWS_DAYS` | `[20, 25, 30, 35, 40, 45]` | Lookback windows (in days) for the ensemble gate. Each window casts one vote; the fraction of "yes" votes becomes the gate value from 0 to 1. Using six windows across a plateau instead of a single N makes the gate robust to the choice of lookback. |
+| `STOP_LOSS_PERCENT` | `50` | Technical stop loss distance from entry price, in percent. Set intentionally unreachable on spot in one week; the only normal exit is time expiry. Required to pass the engine's position validator (`CC_MAX_STOPLOSS_DISTANCE_PERCENT` is set to 100 in `setConfig` to allow this). |
+| `TAKE_PROFIT_PERCENT` | `500` | Technical take-profit distance from entry price, in percent. Equally unreachable in one week; present only to satisfy the engine's bracket position schema. |
+
+### `setConfig` call
+
+Before any constants are declared, the file adjusts two engine settings:
+
+```typescript
+setConfig({
+  CC_MAX_STOPLOSS_DISTANCE_PERCENT: 100, // allows the technical -50% stop
+  CC_BACKTEST_STEP_MINUTES: 24 * 60,     // evaluate positions once per day, not per minute
+});
+```
+
+`CC_BACKTEST_STEP_MINUTES: 1440` is required because the Yahoo candle adapter synthesizes intraday candles by repeating the same daily bar across every minute of that day. Running position evaluation 1440 times on identical candles would be wasteful; stepping once per day is semantically equivalent and 1440× faster.
+
+---
+
+## `getGate` function
+
+```typescript
+const getGate = Cache.fn(async (): Promise<number> => {
+  const candles = await getCandles(GATE_SYMBOL, "1d", Math.max(...GATE_WINDOWS_DAYS) + 1);
+  const closes = candles.map(({ close }) => close);
+  const last = closes[closes.length - 1];
+  const up = GATE_WINDOWS_DAYS.filter((days) => last > closes[closes.length - 1 - days]).length;
+  return up / GATE_WINDOWS_DAYS.length;
+}, { interval: "1d" });
+```
+
+**Line-by-line explanation:**
+
+| Line | What it does |
+|---|---|
+| `Cache.fn(async () => …, { interval: "1d" })` | Wraps the function in a daily cache. The value is computed once per engine day for **all** symbols and automatically invalidated when the engine's clock advances to the next calendar day. Without this, every symbol's `getSignal` call would re-fetch and re-compute the gate independently. |
+| `getCandles(GATE_SYMBOL, "1d", Math.max(...GATE_WINDOWS_DAYS) + 1)` | Requests the last 46 daily closed bars for `BTCUSDT` (the longest window, 45 days, plus one for the "today" close). The engine trims candles at the current backtest time, so there is no look-ahead. |
+| `candles.map(({ close }) => close)` | Extracts only closing prices into a flat array. |
+| `const last = closes[closes.length - 1]` | The most recent closed price (yesterday relative to the strategy tick). |
+| `GATE_WINDOWS_DAYS.filter((days) => last > closes[closes.length - 1 - days]).length` | For each window N, checks whether yesterday's close is higher than the close N days earlier — i.e., whether BTC is in an uptrend over that horizon. Counts how many windows vote "yes". |
+| `return up / GATE_WINDOWS_DAYS.length` | Normalises the vote count to a fraction in `[0, ⅙, ⅔, ½, ⅔, ⅚, 1]`. This is the gate: the share of the deposit that flows into the basket this week. |
+
+---
+
+## `addStrategySchema` — `getSignal` handler
+
+The strategy is registered under the name `"index_fund"` at hourly interval. `getSignal` is called once per tick per symbol in `SYMBOL_LIST`.
+
+### Parameters
+
+<ParamField path="symbol" type="string" required>
+  The trading symbol being evaluated on this tick (e.g. `"BTCUSDT"`, `"PAXGUSDT"`).
+</ParamField>
+
+<ParamField path="when" type="Date" required>
+  The UTC timestamp of the current engine tick. Used to build the signal ID and to anchor the hold duration.
+</ParamField>
+
+<ParamField path="currentPrice" type="number" required>
+  The current market price at the tick, as reported by the exchange adapter. Passed directly to `Position.bracket` for stop/take-profit calculation.
+</ParamField>
+
+### Logic
+
+```typescript
+getSignal: async (symbol, when, currentPrice) => {
+  const gate = await getGate();
+
+  const cost = symbol === PARKING_SYMBOL
+    ? DEPOSIT_USD * (1 - gate)
+    : PER_SYMBOL_USD * gate;
+
+  if (cost < 1) {
+    return null;
+  }
+
+  return {
+    id: `${symbol.toLowerCase()}-${when.toISOString().slice(0, 10)}`,
+    symbol,
+    ...Position.bracket({
+      position: "long",
+      currentPrice,
+      percentStopLoss: STOP_LOSS_PERCENT,
+      percentTakeProfit: TAKE_PROFIT_PERCENT,
+    }),
+    cost: Math.round(cost * 100) / 100,
+    minuteEstimatedTime: HOLD_MINUTES,
+    payload: { gate, weight: cost / DEPOSIT_USD, basketSize: BASKET.length },
+    note: `${symbol} gate=${gate.toFixed(2)} cost=$${cost.toFixed(2)}`,
+  };
+},
+```
+
+**Cost allocation:**
+- For a basket symbol: `cost = (DEPOSIT_USD / BASKET.length) × gate` — a basket symbol receives its equal share scaled by how bullish the gate is.
+- For `PAXGUSDT` (parking): `cost = DEPOSIT_USD × (1 − gate)` — gold absorbs whatever the basket does not hold.
+- If `cost < 1`, the function returns `null`. The engine silently replaces a zero cost with its internal default entry cost, so returning `null` (no signal) is the correct way to skip a sub-dollar position.
+
+### Signal return shape
+
+```typescript
+{
+  id: `${symbol.toLowerCase()}-${when.toISOString().slice(0, 10)}`,
+  symbol,
+  ...Position.bracket({ position: 'long', currentPrice, percentStopLoss, percentTakeProfit }),
+  cost: Math.round(cost * 100) / 100,
+  minuteEstimatedTime: HOLD_MINUTES,
+  payload: { gate, weight: cost / DEPOSIT_USD, basketSize: BASKET.length },
+  note: `${symbol} gate=${gate.toFixed(2)} cost=$${cost.toFixed(2)}`,
+}
+```
+
+### Signal fields
+
+<ResponseField name="id" type="string">
+  Unique signal identifier. Formatted as `<symbol_lowercase>-<YYYY-MM-DD>` using the tick's UTC date. Guarantees one signal per symbol per calendar day.
+</ResponseField>
+
+<ResponseField name="symbol" type="string">
+  The trading symbol this signal is for. Passed through from the `getSignal` parameter unchanged.
+</ResponseField>
+
+<ResponseField name="...Position.bracket(...)" type="object spread">
+  Stop-loss price, take-profit price, and position direction (`"long"`) computed by `Position.bracket`. The spread inlines `entryPrice`, `stopLoss`, `takeProfit`, and `position` fields directly into the signal. Stop is set at −50% and take-profit at +500% from `currentPrice` — both technically unreachable in one week on spot.
+</ResponseField>
+
+<ResponseField name="cost" type="number">
+  The dollar amount allocated to this position, rounded to the nearest cent. This is the actual cash the backtest engine assigns to the entry. For basket symbols: `(DEPOSIT_USD / BASKET.length) × gate`; for `PAXGUSDT`: `DEPOSIT_USD × (1 − gate)`.
+</ResponseField>
+
+<ResponseField name="minuteEstimatedTime" type="number">
+  Expected position lifetime in minutes: `7 * 24 * 60 - 1` (one week minus one minute). The engine closes the position by time when this duration elapses.
+</ResponseField>
+
+<ResponseField name="payload" type="object">
+  Structured metadata attached to the signal and visible in the backtest report's `opened` rows.
+
+  - `gate` (`number`) — the gate value at the time of entry, from 0 to 1.
+  - `weight` (`number`) — `cost / DEPOSIT_USD`; the fraction of the total deposit committed to this leg.
+  - `basketSize` (`number`) — `BASKET.length`; the number of basket symbols in this month's fund (always 20 for standard months).
+</ResponseField>
+
+<ResponseField name="note" type="string">
+  Human-readable summary line logged with the signal. Format: `"<SYMBOL> gate=<0.00> cost=$<0.00>"`. Useful for scanning the engine log to verify gate values and allocation sizes.
+</ResponseField>
+
+---
+
+## `addLauncherSchema` — launcher registration
+
+```typescript
+const SYMBOL_LIST = [...BASKET, PARKING_SYMBOL];
+
+addLauncherSchema({
+  launcherName: 'main_launcher',
+  backtest: true,
+  symbolList: SYMBOL_LIST,
+  cache: false,
+});
+```
+
+<ResponseField name="launcherName" type="string">
+  Identifier for this launcher instance: `'main_launcher'`.
+</ResponseField>
+
+<ResponseField name="backtest" type="boolean">
+  Set to `true` to run in backtest mode. The engine will replay the frame's historical date range rather than connecting to a live feed.
+</ResponseField>
+
+<ResponseField name="symbolList" type="string[]">
+  The full list of symbols the launcher subscribes to: all 20 basket symbols plus `PARKING_SYMBOL` (`"PAXGUSDT"`). Constructed as `[...BASKET, PARKING_SYMBOL]`.
+</ResponseField>
+
+<ResponseField name="cache" type="boolean">
+  Set to `false`. Candle caching is disabled because the Yahoo adapter synthesizes candles from memory on each run; there is nothing to persist or retrieve from cache.
+</ResponseField>
+
+---
+
+## `listenDoneBacktest` — shutdown mechanism
+
+```typescript
+let doneCount = 0;
+
+listenDoneBacktest(() => {
+  doneCount += 1;
+  if (doneCount >= SYMBOL_LIST.length) {
+    kill();
+  }
+});
+```
+
+`listenDoneBacktest` registers a callback that the engine fires once for each symbol when its backtest run completes. Because the engine runs all symbols in `SYMBOL_LIST` simultaneously within a single process, the process must not exit until **every** symbol has finished.
+
+The strategy keeps a simple counter (`doneCount`). Each callback increments it; when the count reaches `SYMBOL_LIST.length` (21 symbols: 20 basket + 1 parking), `kill()` is called to shut down the engine process. This prevents early exit if a faster symbol completes before a slower one, and avoids hanging indefinitely if `kill()` were never called.
+
+`kill` is declared with `declare var kill: any` — it is injected into the module scope by the engine's runner at startup.

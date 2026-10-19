@@ -1,0 +1,83 @@
+---
+title: "Environment Variables and Docker Setup"
+sidebarTitle: "Environment"
+description: "Required environment variables for Redis authentication and Docker Compose configuration for the MongoDB and Redis persistence services."
+---
+
+The backtest-kit engine requires both MongoDB and Redis to be reachable before any strategy can load. Both services are provided as Docker Compose configurations in the `docker/` directory. Start them once before running any month; they can stay running across all subsequent month runs.
+
+## Environment variables
+
+<ParamField query="CC_REDIS_PASSWORD" type="string" required>
+  The password used to authenticate with Redis. Must exactly match the value of `requirepass` in the Redis service definition inside `docker/redis/docker-compose.yaml`. The engine reads this variable when `config/loader.config.ts` establishes the Redis connection. If the variable is absent or mismatched, the connection will be refused and the strategy will not load.
+</ParamField>
+
+## .env file setup
+
+Create a `.env` file at the project root before starting any services:
+
+```bash .env
+CC_REDIS_PASSWORD=your_redis_password_here
+```
+
+`config/loader.config.ts` reads this variable when connecting to Redis. The value must match the `requirepass` argument in `docker/redis/docker-compose.yaml` — if you change the password in the compose file, update `.env` to match, then restart the Redis container.
+
+## MongoDB Docker Compose
+
+```bash
+docker compose -f docker/mongo/docker-compose.yaml up -d
+```
+
+This starts a MongoDB Community Server (v8.0.4) on the default port `27017` with a persistent volume at `docker/mongo/mongo_data/`. MongoDB is used by the engine for:
+
+- **Signal persistence** — every opened and closed position is written to Mongo.
+- **Session state** — the engine's session lifecycle (`SessionLive`) is backed by Mongo.
+- **Strategy memory** — the `MemoryLive` and `StateLive` adapters persist between ticks.
+- **Notifications** — live-mode notification records are stored in Mongo.
+
+**Candles are not written to Mongo.** The exchange adapter calls `PersistCandleAdapter.useDummy()`, which discards all candle writes. Yahoo Finance candles are fetched on demand per ticker and held only in process memory for the duration of a month's run.
+
+## Redis Docker Compose
+
+```bash
+docker compose -f docker/redis/docker-compose.yaml up -d
+```
+
+This starts Redis 7.4.1 on port `6379` with a persistent volume at `docker/redis/redis_data/` and password authentication enabled via `--requirepass`. Redis is used for:
+
+- **Caching** — inter-tick caches (including `Cache.fn` results from the gate computation) are backed by Redis.
+- **Inter-process coordination** — the launcher uses Redis to coordinate state between the engine process and any auxiliary processes.
+
+The password set in the compose file must match `CC_REDIS_PASSWORD` in your `.env` file. The default value in the shipped compose file is `mysecurepassword` — change it in both places before deploying anywhere beyond a local machine.
+
+## Startup order
+
+`config/loader.config.ts` calls `waitForInit()` from `@backtest-kit/mongo`, which blocks strategy loading until both MongoDB and Redis are reachable. **Both services must be fully up before running `npm start`.** Starting the engine before the containers are healthy will cause `waitForInit()` to hang or time out.
+
+The recommended startup sequence is:
+
+```bash
+npm install
+docker compose -f docker/mongo/docker-compose.yaml up -d
+docker compose -f docker/redis/docker-compose.yaml up -d
+# wait a moment for the containers to become healthy, then:
+npm start -- --backtest --entry ./content/apr_2021/main.strategy.ts
+```
+
+## Persistence adapters
+
+`config/setup.config.ts` registers the adapter choices for each engine subsystem. Live mode writes to Mongo; backtest mode uses lightweight in-process or local alternatives so that backtest runs do not pollute the live database:
+
+| Subsystem | Live adapter | Backtest adapter |
+|-----------|-------------|-----------------|
+| `Session` | `SessionLive.usePersist()` | `SessionBacktest.useLocal()` |
+| `Storage` | `StorageLive.usePersist()` | `StorageBacktest.useMemory()` |
+| `Memory` | `MemoryLive.usePersist()` | `MemoryBacktest.useLocal()` |
+| `State` | `StateLive.usePersist()` | `StateBacktest.useLocal()` |
+| `Log` | `Log.useJsonl()` | `Log.useJsonl()` |
+
+`Log.useJsonl()` applies in both modes — every run writes `content/<month>/dump/report/backtest.jsonl` with `opened`, `active`, and `closed` rows for each signal. `Markdown.useDummy()` is also set, suppressing the Markdown dump format that would otherwise duplicate the output.
+
+<Note>
+  Each month's strategy calls `kill()` inside `listenDoneBacktest` once all symbols have completed. This terminates the engine process with a non-zero exit code. This is **expected behavior** — the runner scripts (`scripts/linux/generate_strategy.sh` and `scripts/win/generate_strategy.bat`) do not treat a non-zero exit from `kill()` as an error and will continue to the next month. Do not add error-handling logic that intercepts this exit.
+</Note>

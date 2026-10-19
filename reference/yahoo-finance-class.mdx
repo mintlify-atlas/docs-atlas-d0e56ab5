@@ -1,0 +1,214 @@
+---
+title: "YahooFinance Class: Daily Candle Fetcher"
+sidebarTitle: "YahooFinanceUtils"
+description: "API reference for the YahooFinanceUtils class: fetching and memoizing 15-year daily OHLCV history from Yahoo Finance chart API without an API key."
+---
+
+`YahooFinanceUtils` (exported as the singleton `YahooFinance`) provides daily OHLCV bars directly from the Yahoo Finance chart API — no ccxt, no API key. Its `getCandles` method signature is deliberately compatible with the `fetchOHLCV` contract expected by `backtest-kit`'s `getCandlesFilled` and `getCandlesSampled` functions, making it a drop-in data source for the exchange adapter.
+
+---
+
+## Constructor / Singleton
+
+`YahooFinanceUtils` is a plain class. The module instantiates it once and exports that instance as `YahooFinance`:
+
+```typescript
+export class YahooFinanceUtils {
+  // ...
+}
+
+export const YahooFinance = new YahooFinanceUtils();
+```
+
+Import the singleton in each month's exchange module:
+
+```typescript
+import { YahooFinance } from '../classes/YahooFinance';
+```
+
+Because `fetchAll` (the internal fetch method) is memoized at the instance level, each ticker is fetched from Yahoo at most once per process, regardless of how many times `getCandles` is called for that ticker.
+
+---
+
+## `TRawCandle` type
+
+```typescript
+type TRawCandle = (number | undefined)[];
+// [timestamp_ms, open, high, low, close, volume]
+```
+
+Each element of the returned array is a raw candle tuple in the same format ccxt uses:
+
+| Index | Field | Type | Notes |
+|---|---|---|---|
+| `0` | `timestamp` | `number` | Unix timestamp in **milliseconds**, normalised to midnight UTC of that day. |
+| `1` | `open` | `number` | Opening price of the daily bar. |
+| `2` | `high` | `number` | Intraday high. |
+| `3` | `low` | `number` | Intraday low. |
+| `4` | `close` | `number` | Closing price. |
+| `5` | `volume` | `number` | Quote or base volume; `0` if Yahoo returned `null` for that bar's volume. |
+
+---
+
+## `getCandles` method
+
+```typescript
+public getCandles(
+  ticker: string,
+  interval: string,
+  since: number,
+  limit: number
+): Promise<TRawCandle[]>
+```
+
+The public API. Filters the full memoized history to the requested window and returns it.
+
+<ParamField path="ticker" type="string" required>
+  The Yahoo Finance ticker symbol. This is **not** the Binance trading symbol — the conversion from `"BTCUSDT"` to `"BTC-USD"` is the responsibility of the exchange module's `tickerOf` helper before calling this method.
+
+  Examples:
+  - `'BTC-USD'` — Bitcoin
+  - `'PAXG-USD'` — PAX Gold
+  - `'GC=F'` — Gold futures
+  - `'^GSPC'` — S&P 500 index
+</ParamField>
+
+<ParamField path="interval" type="string" required>
+  The candle interval. **Must be `'1d'`**. Any other value causes an immediate error:
+  ```
+  Error: YahooFinance: only 1d interval is supported, got <interval>
+  ```
+  Yahoo Finance does not provide intraday bars beyond the last 60 days; this class makes no attempt to fetch them.
+</ParamField>
+
+<ParamField path="since" type="number" required>
+  Unix timestamp in **milliseconds**. All bars whose timestamp falls before `since` (after normalising both to day boundaries) are excluded from the result. Bars on the same calendar day as `since` are included.
+</ParamField>
+
+<ParamField path="limit" type="number" required>
+  Maximum number of bars to return. The method iterates the filtered history in chronological order and stops once `limit` bars have been collected.
+</ParamField>
+
+**Returns:** `Promise<TRawCandle[]>` — an array of `[timestamp_ms, open, high, low, close, volume]` tuples, in ascending chronological order, covering at most `limit` bars starting from `since`.
+
+### Internal filtering logic
+
+```typescript
+const start = Math.floor(since / DAY_MS) * DAY_MS;
+const out: TRawCandle[] = [];
+for (const candle of all) {
+  if (candle[0]! < start) continue;
+  out.push(candle);
+  if (out.length >= limit) break;
+}
+return out;
+```
+
+`since` is snapped to the nearest day boundary (`DAY_MS = 86_400_000`) before comparison, ensuring that sub-day precision in the `since` argument does not accidentally exclude the first day's bar.
+
+---
+
+## Internal `fetchAll` method
+
+```typescript
+private fetchAll = memoize(
+  ([ticker]) => ticker,
+  async (ticker: string): Promise<TRawCandle[]> => { ... }
+);
+```
+
+`fetchAll` is the network layer. It downloads the complete 15-year daily history for a ticker in a single HTTP request and returns the parsed candle array. Subsequent calls with the same ticker return the cached result immediately from `memoize` (provided by `functools-kit`) without making another network request.
+
+### Request URL
+
+```
+https://{host}.finance.yahoo.com/v8/finance/chart/{ticker}?range=15y&interval=1d&events=none
+```
+
+- `range=15y` — retrieves up to 15 years of daily data in one response.
+- `interval=1d` — daily bars.
+- `events=none` — suppresses dividend and split event data from the response body.
+- `{host}` alternates between `query2` and `query1` on successive retry attempts (see rate limiting below).
+
+### Timestamp normalisation
+
+Yahoo Finance returns bar timestamps as Unix seconds representing the **session open time in the exchange's local timezone** (e.g. 09:30 ET for US equities, market-open for crypto). This class normalises each timestamp to **midnight UTC of the same calendar day**:
+
+```typescript
+const day = Math.floor((t * 1000 + 12 * 3600_000) / DAY_MS) * DAY_MS;
+```
+
+Adding 12 hours before flooring to day boundary handles the ambiguity of session times that may fall on either side of midnight UTC, ensuring the bar is always attributed to the correct calendar day.
+
+### Null bar filtering
+
+After parsing, any bar where `open`, `high`, `low`, or `close` is `null` or `undefined` is discarded:
+
+```typescript
+if ([open, high, low, close].some((v) => v == null)) return;
+```
+
+Volume nulls are replaced with `0` rather than discarding the bar:
+```typescript
+quote.volume[i] ?? 0
+```
+
+Gaps introduced by this filtering (e.g. holidays, trading halts) are repaired downstream by `getCandlesFilled` in the `backtest-kit` layer.
+
+### Deduplication
+
+Bars are collected into a `Map<number, TRawCandle>` keyed by the normalised day timestamp. If Yahoo returns duplicate entries for the same calendar day, the later entry overwrites the earlier one. The final array is sorted ascending by timestamp.
+
+### Console logging
+
+On a successful fetch, the method logs:
+```
+YahooFinance <ticker>: <N> daily bars YYYY-MM-DD .. YYYY-MM-DD
+```
+
+---
+
+## Rate limiting
+
+Yahoo Finance returns HTTP `429 Too Many Requests` when requests come in too quickly. `fetchAll` handles this with an exponential backoff retry loop.
+
+| Parameter | Value |
+|---|---|
+| Initial backoff (`RETRY_BASE_MS`) | `6000` ms (6 seconds) |
+| Backoff multiplier | `×2` on each retry |
+| Maximum attempts (`MAX_ATTEMPTS`) | `6` |
+| Host alternation | `query2` on attempt 1, `query1` on attempt 2, `query2` on attempt 3, … |
+
+On a `429` response:
+1. A warning is logged: `YahooFinance <ticker>: rate limited (429), retry in Xs`.
+2. The process sleeps for the current backoff duration.
+3. The backoff is doubled.
+4. The next attempt uses the other Yahoo host.
+
+On any non-429 HTTP error, the method throws immediately without retrying:
+```
+Error: YahooFinance <ticker>: HTTP <status>
+```
+
+After all 6 attempts are exhausted without a successful response, the method throws:
+```
+Error: YahooFinance <ticker>: no response after 6 attempts
+```
+
+Because `fetchAll` is memoized, a successful response for a given ticker is cached permanently for the lifetime of the process; rate-limit retries are only incurred on the first request for each ticker.
+
+---
+
+## Limitations
+
+<Warning>
+  **Only `1d` interval is supported.** Calling `getCandles` with any interval other than `'1d'` throws synchronously. The bridge from daily bars to hourly or minute candles is handled by `getCandlesSampled` in `backtest-kit`, not by this class.
+</Warning>
+
+- **No intraday history.** Yahoo Finance only provides intraday bars for the trailing ~60 days and not through the same chart API endpoint. This class does not attempt to fetch intraday data.
+
+- **No authentication.** Requests are made with a plain browser `User-Agent` header and no API key. Yahoo may restrict or change the `/v8/finance/chart/` endpoint without notice.
+
+- **Aggregate prices.** Yahoo Finance reports aggregate or adjusted prices that may differ from Binance's spot prices. For index fund backtesting (weekly rebalancing, order-of-magnitude price comparisons) this is acceptable; for tick-accurate P&L modelling it is not.
+
+- **Volume units.** Volume is returned as reported by Yahoo, which may be in base-asset units, quote units, or shares depending on the instrument. The strategy does not use volume in its signal logic, so this is not consequential for the current implementation.

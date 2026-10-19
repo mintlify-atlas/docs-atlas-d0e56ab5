@@ -1,0 +1,152 @@
+---
+title: "Resolve and Verify Yahoo Finance Ticker Mappings"
+sidebarTitle: "Resolve & Verify"
+description: "How resolve_yahoo_tickers.mjs finds Yahoo ticker symbols and verify_yahoo_tickers.mjs validates them against Binance prices before month generation."
+---
+
+Binance trades `BASEUSDT`; Yahoo Finance tracks `BASE-USD`. For most coins the mapping is trivial, but several tokens share names with older or unrelated assets, causing Yahoo to serve the wrong price series under the obvious ticker. For example, `APE-USD`, `ARB-USD`, and `TON-USD` all existed under those tickers before the Binance listings that carry those names today. Without explicit resolution and validation, a basket coin could silently pull years of wrong data — and the month would never surface the problem, because returns would look plausible. The two scripts in this section catch this class of error before the month folders are generated.
+
+## resolve_yahoo_tickers.mjs
+
+### Command
+
+```bash
+node scripts/common/resolve_yahoo_tickers.mjs
+```
+
+Optional flags: `--refresh` (re-resolve every symbol from scratch) or `--refresh-missing` (re-attempt only symbols currently mapped to `null`).
+
+### What It Does
+
+For each symbol that appears in any basket in `universe.json`, the resolver:
+
+1. Checks whether a `RENAMED` override exists (hardcoded for rebrands, known mis-mappings, and deliberately excluded tokens).
+2. If no override, tries the direct ticker `BASE-USD` against the Yahoo Finance chart API and records the date of the earliest bar.
+3. If `BASE-USD` returns no data, searches Yahoo for the base symbol and project name across up to four queries, collects all `BASE<digits>-USD` candidates, and picks the one with the **oldest** history — the original token, not a later fork.
+
+The resolver also always processes `PAXGUSDT` because it is the gold counter-position present in every month regardless of the basket.
+
+Known manual mappings baked into `RENAMED` include rebrands (`RNDRUSDT` → `RENDER-USD`), tokens whose canonical Yahoo tickers were delisted after a chain migration (`MATICUSDT` → `WMATIC-USD`, `FTMUSDT` → `WFTM-USD`), single-character tickers that the Yahoo search engine cannot find (`SUSDT` → `S32684-USD`), and symbols intentionally excluded (`LUNAUSDT → null` because a single Binance ticker represents two entirely different assets before and after May 2022).
+
+### Output
+
+`scripts/common/yahoo_tickers.json` — a flat object mapping each Binance symbol to either a resolution record or `null`:
+
+```json
+{
+  "BTCUSDT":  { "ticker": "BTC-USD",       "since": "2014-09-17" },
+  "UNIUSDT":  { "ticker": "UNI7083-USD",   "since": "2020-09-17" },
+  "LUNAUSDT": null
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `ticker` | The Yahoo Finance ticker to use when fetching this symbol's candles |
+| `since` | Date of the first available bar on Yahoo (used by `build_universe.mjs` to gate listing-age checks) |
+| `null` | No usable Yahoo data exists; `build_universe.mjs` excludes this symbol from all baskets |
+
+Symbols mapped to `null` leave a gap in the ranked list. `build_universe.mjs` fills that gap from the next-highest-volume coin, which itself needs to be resolved — hence the iterative loop.
+
+---
+
+## verify_yahoo_tickers.mjs
+
+### Command
+
+```bash
+node scripts/common/verify_yahoo_tickers.mjs [--only SYM1,SYM2]
+```
+
+`--only` restricts the run to a comma-separated list of symbols; all other entries in `yahoo_tickers.json` are left unchanged.
+
+### What It Does
+
+For every symbol with a non-null ticker, the verifier fetches the full 15-year daily price history from Yahoo and compares it against Binance monthly closes at **two edges** of each basket month:
+
+- **Start edge** — the close of the *previous* month (the price at which the fund enters the month).
+- **End edge** — the close of the basket month itself.
+
+Checking both edges catches cases where a ticker's early history belongs to a different asset (as with `OP-USD` before October 2022, which carried another coin's price series) and cases where a migration cuts the series mid-stream (DYDX in November 2023 — Binance kept trading, but Yahoo had no price on that date).
+
+A month is marked **bad** when:
+- The worst of the two edges diverges by more than **15%** in log terms between Yahoo and Binance.
+- Any edge has a Binance price but **no Yahoo price** (a gap caused by a token migration).
+- The Binance price is below **1e-5 USD** — Yahoo stores prices to 7 decimal places, so at prices like PEPE's ~8e-7 each step represents a 12% move, making the return series unusable.
+
+If **more than half** of a symbol's basket months are bad, the entire ticker is rejected and set to `null`. If only individual months are bad, they are recorded in a `badMonths` array on the ticker's entry, and `build_universe.mjs` will exclude the symbol from those specific months only.
+
+### Output
+
+**`scripts/common/yahoo_tickers.json`** is updated in place: rejected tickers become `null`; surviving tickers gain or lose the `badMonths` field.
+
+**`scripts/common/yahoo_tickers_rejected.json`** records each rejection with its ticker and human-readable reason:
+
+```json
+{
+  "OPUSDT": {
+    "ticker": "OP-USD",
+    "reason": "price mismatch in 4/6 months, worst 2022-07 start: yahoo 3.21 vs binance 1.08"
+  }
+}
+```
+
+The `badMonths` field written to `yahoo_tickers.json` for partial exclusions looks like:
+
+```json
+{
+  "DYDXUSDT": {
+    "ticker": "DYDX-USD",
+    "since": "2021-09-30",
+    "badMonths": ["2023-11"]
+  }
+}
+```
+
+`build_universe.mjs` reads `badMonths` and skips that coin in those months, letting the next-ranked coin take its slot.
+
+---
+
+## The Convergence Loop
+
+Resolver → builder → resolver is not a one-shot process. Each time a coin is rejected or marked `null`, its basket slot is filled by the next-ranked coin, which itself may be unresolved. Run the loop until both scripts report no further changes:
+
+```bash
+# Step 1 — build the initial ranked universe
+node scripts/common/build_universe.mjs --top 20 --from 2020-09 --to 2026-09
+
+# Step 2 — resolve Yahoo tickers for every coin now in a basket
+node scripts/common/resolve_yahoo_tickers.mjs
+
+# Repeat steps 1 and 2 until build_universe.mjs prints no "unchecked coins" message
+# (typically 2–3 iterations)
+
+# Step 3 — validate all tickers against Binance prices
+node scripts/common/verify_yahoo_tickers.mjs
+
+# If verify rejects any coins, go back to step 1 and repeat until verify reports 0 rejections
+
+# Step 4 — stamp all month folders
+node scripts/common/generate_months.mjs --source content/sep_2020
+```
+
+The process converges because the set of candidates is finite: eventually every coin in every basket slot either has a verified ticker or has been replaced by a coin that does.
+
+---
+
+## Known Mis-Mappings Caught
+
+These are the cases the pipeline was built to catch, each discovered through the verify step:
+
+| Symbol | Ticker | Problem |
+|--------|--------|---------|
+| `APEUSDT` | `APE-USD` | Name collision — APE-USD on Yahoo predates the Binance listing |
+| `ARBUSDT` | `ARB-USD` | Name collision — wrong asset served under the ticker before March 2023 |
+| `TONUSDT` | `TON-USD` | Name collision — the legacy TON ticker does not match the Binance listing |
+| `OPUSDT` | `OP-USD` | Corrupt early history — OP-USD carries another coin's prices before October 2022 |
+| `DYDXUSDT` | `DYDX-USD` | Token migration — Yahoo series is gapped in November 2023 when DYDX moved chains |
+| `PEPEUSDT` | `PEPE-USD` | Price below 1e-5 — at ~8e-7 per token, the 7-decimal limit creates ~12% quantisation steps |
+
+<Warning>
+A missing or incorrect Yahoo ticker in a basket is not caught at generation time — it surfaces as a crash on the **first tick** of that month's backtest run, aborting the entire month. Always run the full build → resolve → verify convergence loop before calling `generate_months.mjs`.
+</Warning>

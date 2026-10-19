@@ -1,0 +1,129 @@
+---
+title: "backtest.module.ts: Exchange Adapter and Frame Schema"
+sidebarTitle: "backtest.module.ts"
+description: "Reference for the exchange adapter (Yahoo candle fetching, ticker mapping, PersistCandleAdapter) and the frame schema defining each month's date range."
+---
+
+`backtest.module.ts` lives alongside `main.strategy.ts` in each month's folder and has two responsibilities: it registers the `yahoo-finance` exchange adapter that the engine uses to fetch candles, and it registers the frame that defines the calendar boundaries of that month's backtest. It does not call `setConfig` — all engine-behaviour changes belong exclusively to `main.strategy.ts`.
+
+---
+
+## `TICKER_OVERRIDES`
+
+```typescript
+const TICKER_OVERRIDES: Record<string, string> = {
+};
+```
+
+`TICKER_OVERRIDES` is a `Record<string, string>` that maps Binance-style symbol names (e.g. `"BTCUSDT"`) to their Yahoo Finance ticker equivalents. The default translation rule strips the `USDT` suffix and appends `-USD`, so `BTCUSDT` becomes `BTC-USD` and `ETHUSDT` becomes `ETH-USD`.
+
+Some coins are traded on Yahoo under a different identifier — for example, if two tokens share the same base symbol, Yahoo may append a numeric suffix to distinguish them. Those cases cannot be derived mechanically and are listed explicitly in `TICKER_OVERRIDES`. The generator script (`scripts/common/generate_months.mjs`) populates this block from `yahoo_tickers.json` for each month it produces.
+
+In the `apr_2021` reference month the block is empty — all twenty basket symbols plus `PAXGUSDT` map correctly with the default rule.
+
+### `tickerOf` helper
+
+```typescript
+const tickerOf = (symbol: string): string =>
+  TICKER_OVERRIDES[symbol] ?? symbol.replace(/USDT$/, '-USD');
+```
+
+`tickerOf` converts a strategy symbol to the Yahoo Finance ticker the `YahooFinance` class expects:
+
+1. Check `TICKER_OVERRIDES` first. If a manual mapping exists, use it.
+2. Otherwise, apply the default substitution: remove the trailing `USDT` and append `-USD`.
+
+Examples: `"BTCUSDT"` → `"BTC-USD"`, `"PAXGUSDT"` → `"PAXG-USD"`.
+
+---
+
+## `addExchangeSchema`
+
+```typescript
+const fetchOHLCV = (symbol: string, interval: string, since: number, limit: number) =>
+  YahooFinance.getCandles(tickerOf(symbol), interval, since, limit);
+
+addExchangeSchema({
+  exchangeName: 'yahoo-finance',
+  getCandles: async (symbol, interval, since, limit) =>
+    await getCandlesSampled(fetchOHLCV, { symbol, interval, since, limit }),
+});
+```
+
+<ResponseField name="exchangeName" type="string">
+  Registers this adapter under the name `'yahoo-finance'`. The engine routes all candle requests to the `getCandles` function defined here.
+</ResponseField>
+
+<ResponseField name="getCandles" type="async function">
+  The adapter's candle-fetching entry point. Receives `symbol` (Binance-style), `interval`, `since` (Unix ms), and `limit` (bar count). Every call is forwarded to `getCandlesSampled`.
+
+  - `fetchOHLCV` is the inner fetcher: it translates the symbol to a Yahoo ticker via `tickerOf`, then delegates to `YahooFinance.getCandles`. Yahoo only provides daily bars, so `fetchOHLCV` always receives `interval = '1d'` from the sampler.
+  - `getCandlesSampled` is the bridge layer from `backtest-kit` that handles the daily→minute/hour synthesis (see the next section).
+</ResponseField>
+
+### `PersistCandleAdapter.useDummy()`
+
+```typescript
+PersistCandleAdapter.useDummy();
+```
+
+Called immediately after `addExchangeSchema`. `useDummy()` replaces the engine's MongoDB candle persistence adapter with an in-memory no-op implementation. Because all candles are synthesized at runtime from Yahoo daily bars, writing them to or reading them from Mongo would waste I/O and accumulate stale data. With the dummy adapter active, synthesized candles exist only in process memory and are never written to the database.
+
+---
+
+## `addFrameSchema`
+
+```typescript
+addFrameSchema({
+  frameName: 'apr_2021_frame',
+  interval: '1h',
+  startDate: new Date('2021-04-01T00:00:00Z'),
+  endDate: new Date('2021-04-30T23:59:59Z'),
+  note: 'April 2021',
+});
+```
+
+The frame pins the engine to a specific calendar window. The generator rewrites the frame block for each month folder.
+
+<ResponseField name="frameName" type="string">
+  A unique identifier for this frame, named after the month: `'apr_2021_frame'`. The engine uses this to locate and replay the correct time window.
+</ResponseField>
+
+<ResponseField name="interval" type="string">
+  The tick interval the strategy runs at: `'1h'` (hourly). The strategy's `getSignal` handler is called once per hour per symbol. This is also the interval at which the `getGate` cache invalidation is checked.
+</ResponseField>
+
+<ResponseField name="startDate" type="Date">
+  The first instant of the month in UTC: `new Date('2021-04-01T00:00:00Z')`. The engine begins replaying candles from this timestamp.
+</ResponseField>
+
+<ResponseField name="endDate" type="Date">
+  The last instant of the month in UTC: `new Date('2021-04-30T23:59:59Z')`. Replay stops after this timestamp; any open position with `minuteEstimatedTime` extending beyond this boundary is closed at end-of-frame.
+</ResponseField>
+
+<ResponseField name="note" type="string">
+  A human-readable label for the frame, e.g. `'April 2021'`. Shown in engine logs and reports.
+</ResponseField>
+
+---
+
+## `getCandlesSampled` vs `getCandlesFilled`
+
+Yahoo Finance only provides daily (`1d`) bars; the engine requests intraday candles at the frame's `1h` interval. `backtest-kit` bridges this mismatch with two cooperating functions:
+
+### `getCandlesFilled`
+
+Handles `1d` requests. It places Yahoo's daily bars onto a continuous calendar grid (Monday through Sunday, including days Yahoo does not trade), finds gaps left by weekends, public holidays, and missing data, and repairs each gap with a flat bar derived from its nearest neighbours. Anomalous bars — zeros, hundredfold wicks — are treated the same way. The thresholds for what counts as "anomalous" are controlled by the `CC_GET_CANDLES_*` engine config keys.
+
+The output is a dense, gapless daily series that covers every calendar day in the requested range.
+
+### `getCandlesSampled`
+
+The entry point called by the exchange adapter's `getCandles`. It inspects the requested `interval`:
+
+- **`interval = '1d'`** — delegates directly to `getCandlesFilled`, returning repaired daily bars as-is.
+- **`interval = '1h'`, `'1m'`, or any sub-daily interval** — first obtains the repaired daily series via `getCandlesFilled`, then expands each daily bar by repeating it across every sub-interval slot that falls within that day. Every hour (or minute) of a given day carries the same `open`, `high`, `low`, `close`, and `volume` as that day's daily bar.
+
+This sampling approach means that intraday price movements within a day are not simulated — all ticks of a day are identical. For the index fund's weekly time-exit strategy this is acceptable: position sizing is decided once per day when the gate is evaluated, and the only exit path in normal operation is `time_expired` at the end of the week. Intraday stop or take-profit triggers would be unreliable with sampled candles, which is why those levels are set far out of reach.
+
+The strategy sets `CC_BACKTEST_STEP_MINUTES: 1440` (one full day) so the engine evaluates each position exactly once per daily bar rather than once per hour on 24 identical hourly candles.

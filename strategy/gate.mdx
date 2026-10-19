@@ -1,0 +1,74 @@
+---
+title: "BTC Trend Gate: Ensemble Momentum Signal"
+sidebarTitle: "BTC Gate"
+description: "The BTC trend gate votes across six lookback windows (20–45 days) to produce a 0–1 basket exposure fraction, eliminating single-parameter sensitivity."
+---
+
+The BTC trend gate answers one question before every weekly position: how much of the deposit should go into the crypto basket right now? Rather than picking a single moving-average crossover — which would make the backtest results sensitive to whichever window happens to fit the data — the gate asks six independent questions simultaneously and counts the yes votes. The result is a number between 0 and 1 that reflects broad Bitcoin momentum consensus across a range of lookback lengths. When most windows agree that Bitcoin is rising, the fund is mostly in crypto; when most disagree, the fund retreats into gold.
+
+## The Formula
+
+The gate is computed by `getGate`, a cached async function that runs once per day:
+
+```typescript
+const GATE_WINDOWS_DAYS = [20, 25, 30, 35, 40, 45];
+
+const getGate = Cache.fn(async (): Promise<number> => {
+  const candles = await getCandles(GATE_SYMBOL, '1d', Math.max(...GATE_WINDOWS_DAYS) + 1);
+  const closes = candles.map(({ close }) => close);
+  const last = closes[closes.length - 1];
+  const up = GATE_WINDOWS_DAYS.filter((days) => last > closes[closes.length - 1 - days]).length;
+  return up / GATE_WINDOWS_DAYS.length;
+}, { interval: '1d' });
+```
+
+Walking through each line:
+
+1. **`getCandles(GATE_SYMBOL, '1d', Math.max(...GATE_WINDOWS_DAYS) + 1)`** — fetches `BTCUSDT` daily candles going back 46 bars (the longest window plus one to have a reference close at that distance). The engine trims `getCandles` at the current backtest time, so the last bar is always the most recently *closed* day; there is no look-ahead.
+
+2. **`candles.map(({ close }) => close)`** — extracts only the closing prices into a flat array.
+
+3. **`const last = closes[closes.length - 1]`** — the most recent closed daily close.
+
+4. **`GATE_WINDOWS_DAYS.filter((days) => last > closes[closes.length - 1 - days]).length`** — for each window length *N*, checks whether BTC's current close is higher than its close *N* days ago. Each window that is higher contributes one vote; `.length` counts the yes votes.
+
+5. **`return up / GATE_WINDOWS_DAYS.length`** — divides the yes count by 6 to return a fraction. With six windows the possible return values are 0, 1/6, 2/6, 3/6, 4/6, 5/6, and 6/6.
+
+## Caching
+
+`Cache.fn` with `{ interval: '1d' }` ensures the gate is computed at most once per simulated day, regardless of how many symbols call it:
+
+- On a given backtest day the first symbol to call `getGate()` triggers the actual computation and stores the result.
+- Every subsequent symbol on the same day receives the cached value instantly.
+- When the engine advances to the next day, the cache is automatically invalidated and the next call triggers a fresh computation.
+
+This is safe against look-ahead because the underlying `getCandles` call is already bounded by the engine's current time. Caching only eliminates redundant work across the 21 simultaneous symbol backtests — it does not change which data is visible.
+
+## Gate Values and Their Meaning
+
+With six binary votes, there are exactly seven possible gate values:
+
+| Gate | Yes votes | Basket exposure | PAXG allocation |
+|------|-----------|-----------------|-----------------|
+| 0    | 0 / 6     | 0 % (no crypto signals) | 100 % |
+| 1/6 ≈ 0.17 | 1 / 6 | 17 % | 83 % |
+| 2/6 ≈ 0.33 | 2 / 6 | 33 % | 67 % |
+| 3/6 = 0.50 | 3 / 6 | 50 % | 50 % |
+| 4/6 ≈ 0.67 | 4 / 6 | 67 % | 33 % |
+| 5/6 ≈ 0.83 | 5 / 6 | 83 % | 17 % |
+| 6/6 = 1.00 | 6 / 6 | 100 % | 0 % (no PAXG signal) |
+
+"Basket exposure" is the fraction of the $1,000 deposit that flows into the twenty basket coins collectively. "PAXG allocation" is the complementary fraction that buys tokenized gold for the same week. The two legs always sum to 100 %.
+
+## Why 20–45 Days
+
+The six windows were not chosen by optimizing the backtest. They were chosen because empirical analysis of Bitcoin momentum shows a broad **plateau** in strategy performance for lookback windows roughly in the 25–45 day range. Lookbacks shorter than ~20 days tend to react to noise; lookbacks much longer than 45 days are slow to exit drawdowns. The plateau means that the exact choice of *N* within that range makes little difference to the outcome.
+
+Using all six windows as an ensemble rather than picking one achieves two things:
+
+1. **No knife-edge parameter.** The result does not depend on whether you picked 30 days or 35 days. A single lookback at the edge of the plateau — say 22 days — would perform noticeably worse than one in the middle. The ensemble stays well clear of any edge.
+2. **Smoother transitions.** A single crossover switches from fully-in to fully-out in one step. Six windows produce intermediate states (1/6, 2/6, …), so the fund scales in and out gradually as consensus builds or fades.
+
+<Note>
+The gate value at the time each position was opened is recorded in the `payload` field of every `opened` row in the monthly JSONL report. Filter on `payload.gate` to analyse performance by regime, or verify that the allocation arithmetic in `payload.weight` matches `gate / basketSize`.
+</Note>

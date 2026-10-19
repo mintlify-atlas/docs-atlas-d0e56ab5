@@ -1,0 +1,60 @@
+---
+title: "Deposit Allocation: Basket Weighting and Gold Parking"
+sidebarTitle: "Allocation"
+description: "Equal-weight basket allocation scaled by the BTC gate, with PAXG receiving the unallocated fraction — the deposit is never idle."
+---
+
+The allocation model has one job: make sure every dollar of the $1,000 deposit is put to work every week, split between the crypto basket and gold in a ratio dictated by the BTC trend gate. There is no cash. When Bitcoin momentum is absent the full deposit parks in gold; when momentum is strong the full deposit goes into crypto; at intermediate gate values the two legs share the deposit proportionally. The arithmetic is intentionally simple — a single multiply per symbol — so the mechanism is fully transparent from the report's `payload` fields.
+
+## Allocation Formula
+
+The exact code from `main.strategy.ts`:
+
+```typescript
+const DEPOSIT_USD = 1000;
+const PER_SYMBOL_USD = DEPOSIT_USD / BASKET.length;
+
+const cost = symbol === PARKING_SYMBOL
+  ? DEPOSIT_USD * (1 - gate)
+  : PER_SYMBOL_USD * gate;
+
+if (cost < 1) {
+  return null;
+}
+```
+
+- **`PER_SYMBOL_USD`** is the equal per-coin budget before gate scaling: $1,000 divided by the number of basket symbols (20 for a full month). This is computed once at module load time and shared across all `getSignal` calls.
+- **Basket symbols** receive `PER_SYMBOL_USD * gate`. When the gate is 1 each coin gets its full share; when the gate is 0.5 each coin gets half.
+- **`PARKING_SYMBOL` (PAXG)** receives the complementary fraction `DEPOSIT_USD * (1 - gate)`. It sees the whole deposit minus whatever went into crypto.
+- **`if (cost < 1) return null`** — any leg whose computed cost is less than $1 returns no signal at all. This threshold guards against a subtle engine behaviour: passing `cost: 0` to a signal does not silence it; instead the engine silently replaces zero with its own default entry cost (typically $100). Returning `null` is the correct way to express "do not trade this symbol this week."
+
+## Worked Example
+
+With a gate of **0.5** and a **20-symbol** basket:
+
+| Leg | Formula | Cost |
+|-----|---------|------|
+| Each basket coin (×20) | `($1000 / 20) × 0.5` | **$25.00** |
+| PAXG | `$1000 × (1 − 0.5)` | **$500.00** |
+| **Total** | | **$1,000.00** |
+
+The twenty basket coins collectively receive $500 ($25 × 20) and PAXG receives the other $500. At gate = 1 each basket coin gets $50 and PAXG receives nothing (cost = 0 → `null`). At gate = 0 every basket coin returns `null` and PAXG receives the full $1,000.
+
+## The Parking Symbol
+
+`PARKING_SYMBOL = "PAXGUSDT"` is PAX Gold, a Binance-listed token backed one-to-one by London Good Delivery gold bars. It is chosen as the counter-position rather than a stablecoin because the goal is to stay invested — in something uncorrelated with crypto risk — rather than to hold idle cash. Gold has historically moved differently from equities and crypto during risk-off periods, so the fund's "defensive" leg is itself a market position, not an absence of one.
+
+When `gate = 0`, no basket signals are emitted and the entire deposit buys PAXG for that week. When `gate = 1`, no PAXG signal is emitted and the entire deposit is in the basket. At intermediate values both legs are active simultaneously.
+
+## Per-Symbol Accounting
+
+backtest-kit runs each symbol as a completely independent backtest. There is no shared portfolio object, no margin account, and no cross-symbol balance. The "fund" is a conceptual layer that exists only as:
+
+1. The allocation arithmetic above, which assigns a `cost` to each signal.
+2. The sum of `pnlCost` across all symbols in the monthly JSONL report, which gives the total fund P&L for the month.
+
+This design means the deposit constant is an accounting convention, not a real balance. Each symbol's backtest behaves as if it has its own independent $1,000 to work with, but only spends the `cost` fraction of it. Monthly totals are computed by the `summarize_reports.mjs` script, which aggregates across all symbol reports.
+
+<Warning>
+Because each symbol is an independent backtest, there is no mechanism that prevents two symbols from theoretically "spending" the same dollar. The deposit invariant — basket total + PAXG = $1,000 — holds only if the gate is read from the same day's computation for all symbols. `Cache.fn` with `{ interval: '1d' }` guarantees this within a single engine run, but the invariant should be verified in the report: `sum(payload.weight)` across all opened signals for the same week should equal 1.0. When gate = 0, all basket symbols emit `null` and PAXG absorbs the full deposit; the sum is still 1.0 (from PAXG alone).
+</Warning>

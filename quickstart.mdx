@@ -1,47 +1,154 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Backtest Index Fund in Minutes"
+sidebarTitle: "Quickstart"
+description: "Install Node.js dependencies, start MongoDB and Redis with Docker Compose, then run your first monthly backtest or replay all 73 months in sequence."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+By the end of this guide you will have run a complete single-month backtest end-to-end: dependencies installed, persistence up, the engine simulating a weekly index fund over one calendar month, and a JSONL report on disk ready to inspect. From there you can replay all 73 months in one command and fold every result into a summary table.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+**Prerequisites before you begin:**
+- **Node.js 18+** — the CLI and scripts require the modern `fetch` API and ESM support.
+- **TypeScript 5+** — listed as a peer dependency; install globally or let `npm install` resolve it locally.
+- **Docker with the Compose plugin** — both persistence services are defined as Compose files. The classic `docker-compose` (v1) binary also works if you substitute it for `docker compose`.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+<Step title="Install dependencies">
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+From the repo root, run:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+```bash
+npm install
+```
+
+This installs the full backtest-kit suite — `@backtest-kit/cli`, `backtest-kit`, `@backtest-kit/mongo`, `@backtest-kit/ui`, and all supporting packages — as well as utility libraries (`dayjs`, `ioredis`, `mongoose`, `functools-kit`). No separate build step is needed; the CLI compiles and executes TypeScript strategies directly.
+
+</Step>
+
+<Step title="Start persistence">
+
+The engine requires both MongoDB and Redis before it will load any strategy. Start them with the Compose files in the `docker/` directory:
+
+<CodeGroup>
+
+```bash Linux / macOS
+docker compose -f docker/mongo/docker-compose.yaml up -d
+docker compose -f docker/redis/docker-compose.yaml up -d
+```
+
+```powershell Windows (PowerShell)
+docker compose -f docker/mongo/docker-compose.yaml up -d
+docker compose -f docker/redis/docker-compose.yaml up -d
+```
+
+</CodeGroup>
+
+MongoDB starts on port `27017` with a persistent volume at `docker/mongo/mongo_data/`. Redis starts on port `6379` with password `mysecurepassword` (set `CC_REDIS_PASSWORD=mysecurepassword` in a `.env` file at the repo root to match).
+
+`config/loader.config.ts` exports an async function that calls `waitForInit()` from `@backtest-kit/mongo`. The CLI blocks strategy loading until both connections are confirmed — if either service is unreachable you will see a connection timeout rather than a cryptic runtime error.
+
+<Note>
+Candle data is **never written to MongoDB**. Each month's `backtest.module.ts` calls `PersistCandleAdapter.useDummy()`, so the synthesized minute candles stay in memory. Only signals, sessions, and state documents land in Mongo.
+</Note>
+
+</Step>
+
+<Step title="Run a single month">
+
+```bash
+npm start -- --backtest --ui --entry ./content/sep_2020/main.strategy.ts
+```
+
+Flag breakdown:
+
+| Flag | Effect |
+|---|---|
+| `--backtest` | Runs the engine in backtest mode: positions are simulated against historical candles fetched from Yahoo Finance, not a live exchange. |
+| `--ui` | Serves a local browser UI (typically at `http://localhost:3000`) where you can watch signals and equity update in real time as the engine steps through the month. Omit for headless runs. |
+| `--entry` | Path to the strategy file to execute. Each month folder is fully self-contained, so this single flag is all that changes between months. |
+
+The engine steps through the month one day at a time (`CC_BACKTEST_STEP_MINUTES: 1440` is set inside the strategy). Each weekly position opens with `Position.bracket`, holds for `HOLD_MINUTES` (one week minus one minute), and closes by `time_expired`. When the month's frame ends the process calls `kill()` and exits with a non-zero code — this is expected and normal.
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+Try September 2020 (`sep_2020`) as your first run: it is the reference month from which all others are generated, and its basket is well-documented in the source comments.
+</Tip>
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+</Step>
+
+<Step title="Run all 73 months in sequence">
+
+<CodeGroup>
+
+```bash Linux / macOS
+bash scripts/linux/generate_strategy.sh
+```
+
+```batch Windows (Command Prompt)
+scripts\win\generate_strategy.bat
+```
+
+</CodeGroup>
+
+The runner script iterates every month folder in chronological order and invokes `npm start -- --backtest --entry` for each one. Each month's engine process exits with a non-zero code when the backtest frame ends (via the engine's internal `kill()` call). Both runners treat this as a normal completion, not an error, and continue to the next month.
+
+Each completed month writes its report to `content/<month>/dump/report/backtest.jsonl`. If `opened` count does not equal `closed` count in a month's report the run was interrupted — re-run that month individually to complete it.
+
+</Step>
+
+<Step title="Summarize all results">
+
+Once all (or some) months have run:
+
+```bash
+node scripts/common/summarize_reports.mjs
+```
+
+This scans every `content/*/dump/report/backtest.jsonl` file and prints a consolidated table. Columns:
+
+| Column | Meaning |
+|---|---|
+| `month` | Calendar month (e.g. `sep_2020`) |
+| `opened` | Number of positions opened during the month |
+| `closed` | Number of positions closed (should equal `opened`) |
+| `net$` | Net P&L in USD across all symbols for the month |
+| `net%` | Net return as a percentage of total deployed capital |
+| `fees$` | Engine-estimated trading costs for the month |
+| `gross%` | Gross return before fees |
+| `PAXG$` | P&L contribution from the PAXG (gold) counter-position |
+| `gate range` | Min–max gate value observed during the month (0 = fully in gold, 1 = fully in alts) |
+| `non-time closes` | Count of positions that did **not** close via `time_expired` — each one is worth investigating for data issues |
+
+The script also prints a cumulative P&L and drawdown summary across all months.
+
+</Step>
+
+</Steps>
+
+## What to Look for in the Report
+
+Each month's report is at `content/<month>/dump/report/backtest.jsonl`. Every line is a JSON object with a `type` field:
+
+```jsonl
+{"type":"opened","symbol":"BTCUSDT","time":1598918400000,"cost":46.3, ...,"payload":{"gate":0.5,"weight":0.0463,"basketSize":21}}
+{"type":"active","symbol":"BTCUSDT","time":1599004800000, ...}
+{"type":"closed","symbol":"BTCUSDT","time":1599523140000,"closeReason":"time_expired","pnlCost":2.14, ...}
+```
+
+Key things to check:
+
+- **`closeReason: "time_expired"`** is the normal, expected exit. Every position is designed to run for exactly one week and close on the time limit. Any other close reason (stop-loss, take-profit, or manual) indicates an unusual data event and should be investigated.
+- **`payload` on `opened` rows** carries three fields that describe the market state at entry:
+  - `gate` — the Bitcoin trend gate value (0–1) at the moment the position was opened. This determines how much of the deposit is in alts vs. PAXG that week.
+  - `weight` — the fraction of `DEPOSIT_USD` allocated to this specific symbol (`gate / basketSize` for basket symbols, `1 − gate` for PAXG).
+  - `basketSize` — the total number of symbols in the basket for that month (20 alts + PAXG = 21).
+- **`pnlCost` on `closed` rows** is the realized P&L for that position in USD. Sum these across a month to get the net result, or use `summarize_reports.mjs` to do it automatically.
+
+<Note>
+If `opened` ≠ `closed` for a month, the backtest run was interrupted mid-month. Re-run that month with `npm start -- --backtest --entry ./content/<month>/main.strategy.ts` to complete it. The engine will resume from where it left off using the state stored in MongoDB.
+</Note>
+
+<Tip>
+Ready to understand why the gate uses six lookback windows instead of one, or why PAXG is the counter-position rather than cash? Head to [Strategy Overview](/strategy/overview) for a full walkthrough of the fund mechanics.
 </Tip>

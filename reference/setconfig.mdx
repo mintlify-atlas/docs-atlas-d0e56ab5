@@ -1,0 +1,53 @@
+---
+title: "setConfig: Engine Configuration Options"
+sidebarTitle: "setConfig"
+description: "All setConfig keys used in the index fund strategy and their effect on backtest-kit engine behavior, from step size to anomaly thresholds."
+---
+
+`setConfig` is called once in `main.strategy.ts` to configure the backtest-kit engine for this fund's specific data and holding pattern. The call applies globally for the lifetime of that engine process, so a single invocation at the top of the strategy file is enough.
+
+## Call site
+
+The exact call used in the reference month (`content/apr_2021/main.strategy.ts`):
+
+```typescript
+setConfig({
+  CC_MAX_STOPLOSS_DISTANCE_PERCENT: 100,
+  // Candles are daily from Yahoo, minutes are sampled and identical within a day:
+  // positions are evaluated once per day instead of a per-minute cycle.
+  // The strategy tick cadence stays at the frame interval.
+  CC_BACKTEST_STEP_MINUTES: 24 * 60,
+});
+```
+
+## Keys used in this fund
+
+<ParamField query="CC_MAX_STOPLOSS_DISTANCE_PERCENT" type="number" default="50">
+  Validators enforce that a stop loss cannot be placed further than this percentage from the entry price. The fund uses a technical stop of −50% that exists solely to satisfy the engine's bracket order requirement — the position's only normal exit is `time_expired` after one week. The engine's default of `50` would reject a `percentStopLoss` of `50` because the validator compares the distance strictly, so the fund sets this to `100` to let the value pass.
+</ParamField>
+
+<ParamField query="CC_BACKTEST_STEP_MINUTES" type="number" default="1">
+  The engine evaluates each open position every this many minutes of simulated time. Because the Yahoo Finance adapter synthesizes minute candles by repeating a single daily bar across all 1440 minutes of a day, evaluating every minute produces identical results 1440 times and wastes CPU. Setting this to `24 * 60` (1440) collapses those iterations to one evaluation per daily bar without affecting results. The strategy's tick cadence (the interval passed to `addStrategySchema`) is unaffected.
+</ParamField>
+
+## Additional keys referenced in source and docs
+
+These keys are not set in the default `setConfig` call but appear in supporting files or are documented in `docs/HOWTO.md`. They can be added to the `setConfig` call in `main.strategy.ts` to override engine defaults.
+
+| Key | Type | Default | Purpose |
+|-----|------|---------|---------|
+| `CC_LAUNCHER_CANDLE_CACHE_DEFAULT` | `boolean` | `true` | Whether to cache candles between launcher runs. Set to `false` in `config/loader.config.ts` so that every strategy run fetches fresh candles rather than reusing a stale cache from a previous process. |
+| `CC_GET_CANDLES_PRICE_ANOMALY_THRESHOLD_FACTOR` | `number` | engine default | Multiplier threshold for detecting anomalous bars — zeros and hundredfold wicks in the Yahoo daily feed. Bars that exceed the threshold are repaired by `getCandlesFilled` with a flat bar derived from neighbouring closes. |
+| `CC_GET_CANDLES_MAX_ANOMALY_STREAK` | `number` | engine default | Maximum number of consecutive anomalous bars the repair algorithm will fix before giving up and leaving the gap unrepaired. Relevant when a ticker has a prolonged data outage on Yahoo. |
+| `CC_PERCENT_FEE` | `number` | `0.001` (0.1%) | Taker fee applied per trade side. Not overridden in the strategy; used by `scripts/common/summarize_reports.mjs` to compute estimated round-trip costs alongside realized PnL. |
+| `CC_PERCENT_SLIPPAGE` | `number` | `0.001` (0.1%) | Slippage applied per trade side. Not overridden in the strategy; included in the cost estimate produced by the summarizer. |
+
+## Where to call setConfig
+
+`setConfig` belongs **only in `main.strategy.ts`**. Never place it in the exchange module (`modules/backtest.module.ts`) or the config files (`config/loader.config.ts`, `config/setup.config.ts`). Those files register persistence adapters and handle infrastructure initialization — they do not control engine behaviour. Placing `setConfig` in them would couple infrastructure setup to strategy parameters and make the month folders non-self-contained.
+
+The one exception visible in `config/loader.config.ts` is `CC_LAUNCHER_CANDLE_CACHE_DEFAULT: false`, which is an infrastructure concern (whether the launcher reuses cached candle data between process restarts) rather than a strategy parameter, and is deliberately kept separate.
+
+<Warning>
+  Changing `setConfig` values in the reference month and regenerating will propagate the new values to all future month folders but will **not** affect already-completed runs. If you need to compare results before and after a parameter change, preserve the existing `content/<month>/dump/report/backtest.jsonl` files before regenerating, because rerunning a month overwrites its report.
+</Warning>

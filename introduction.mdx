@@ -1,0 +1,127 @@
+---
+title: "Backtest Index Fund: Weekly Crypto Index on backtest-kit"
+sidebarTitle: "Introduction"
+description: "Backtest Index Fund simulates a weekly top-20 Binance USDT pair basket with a Bitcoin trend gate and PAXG counter-position, replayed month by month from 2020."
+---
+
+Backtest Index Fund is a research-grade crypto index fund simulator built on top of [backtest-kit](https://github.com/tripolskypetr/backtest-kit). It answers two questions that are easy to hand-wave in a spreadsheet but impossible to ignore in an engine: **which coins were actually in the index on a given month** (not the survivors visible today), and **what happens to the capital when the index is not worth holding**. Every month from September 2020 onward is replayed with the basket that was knowable before that month began, with a Bitcoin trend gate scaling exposure from 0 to 1, and with the idle portion of the deposit parked in tokenized gold (PAXG). The project is aimed at quantitative researchers who want a reproducible, honest record of a rules-based crypto allocation, and at developers building their own strategies on backtest-kit who need a non-trivial reference to study.
+
+## Core Concept
+
+The repository contains **73 self-contained month folders** under `content/`. Every month is a complete, independent unit: it holds its own strategy file, its own Yahoo Finance candle fetcher, and its own exchange adapter. There is no shared module between months — this is a deliberate rule of the repo, not an omission. A folder dropped into a fresh clone must reproduce its result exactly. A refactor to one month's code cannot silently change another month's numbers.
+
+The basket for each month is a frozen constant inside that month's strategy. It is the top-20 Binance USDT spot pairs by quote volume of the *previous* calendar month, with three filters applied before the month starts: listed at least 90 days prior, not a stablecoin, fiat, leveraged token, or wrapped/staked derivative of BTC or ETH, and tradable on Yahoo Finance for the full month. Delisted and forgotten coins appear in the months when they were liquid; this year's memecoins are not in 2021. There is no survivorship bias by construction.
+
+<Note>
+The 73 month folders are **generated** by `scripts/common/generate_months.mjs` from a single reference month (`content/sep_2020/`). To change the strategy logic for all months, edit the reference month and re-run the generator. Never edit a generated month by hand — the next generation run will overwrite it.
+</Note>
+
+## Project Structure
+
+Each month folder follows the same three-file layout:
+
+```
+content/
+└── sep_2020/                       ← one folder per month
+    ├── main.strategy.ts            ← fund logic, basket constant, launcher
+    ├── classes/
+    │   └── YahooFinance.ts         ← daily candle fetcher (no API key)
+    └── modules/
+        └── backtest.module.ts      ← exchange adapter, ticker map, frame
+```
+
+The top-level layout around the month folders looks like this:
+
+```
+backtest-index-fund/
+├── config/
+│   ├── loader.config.ts            ← waits for Mongo + Redis before loading
+│   └── setup.config.ts             ← persistence adapters for backtest mode
+├── content/
+│   ├── sep_2020/                   ← reference month (73 folders total)
+│   │   ├── main.strategy.ts
+│   │   ├── classes/YahooFinance.ts
+│   │   └── modules/backtest.module.ts
+│   └── … (oct_2020 … sep_2026)
+├── docker/
+│   ├── mongo/docker-compose.yaml
+│   └── redis/docker-compose.yaml
+├── scripts/
+│   ├── common/
+│   │   ├── build_universe.mjs
+│   │   ├── resolve_yahoo_tickers.mjs
+│   │   ├── verify_yahoo_tickers.mjs
+│   │   ├── generate_months.mjs
+│   │   └── summarize_reports.mjs
+│   ├── linux/generate_strategy.sh
+│   └── win/generate_strategy.bat
+└── package.json
+```
+
+### Per-month file roles
+
+| File | Role |
+|---|---|
+| `main.strategy.ts` | Fund constants (`DEPOSIT_USD`, `HOLD_MINUTES`, gate windows), gate computation on BTC daily bars via `Cache.fn`, allocation logic (`cost = deposit / basketSize × gate` for alts, `deposit × (1 − gate)` for PAXG), and the `addStrategySchema` launcher with the month's frozen basket |
+| `classes/YahooFinance.ts` | Daily candle fetcher that calls the Yahoo Finance chart API directly — no API key, no ccxt. Compatible with `getCandlesFilled` / `getCandlesSampled` as a drop-in fetcher argument |
+| `modules/backtest.module.ts` | Registers the exchange schema and candle adapter; contains the `BASEUSDT → BASE-USD` ticker mapping plus the month's explicit Yahoo overrides; sets the backtest frame (start/end timestamps) for the month |
+
+<Tip>
+The only block that differs between any two months is `BASKET:BEGIN … BASKET:END` in `main.strategy.ts`, the `TICKER_OVERRIDES` block and the frame timestamps in `backtest.module.ts`. Everything else is identical — which is exactly what makes the months comparable.
+</Tip>
+
+## Dependencies
+
+The project is a standard Node.js package. Key runtime dependencies and what they do:
+
+| Package | Version | Purpose |
+|---|---|---|
+| `backtest-kit` | 22.0.0 | Core engine: position lifecycle, candle pipeline, gate caching, signal emission |
+| `@backtest-kit/cli` | 22.0.0 | CLI launcher (`npm start`) that parses `--backtest`, `--ui`, and `--entry` flags and wires the config files |
+| `@backtest-kit/mongo` | 22.0.0 | MongoDB persistence adapters for sessions, state, and signals; exports `waitForInit` used in `loader.config.ts` |
+| `@backtest-kit/ui` | 22.0.0 | Optional browser-based UI served on `localhost` when `--ui` is passed |
+| `dayjs` | 1.11.20 | Date arithmetic for gate lookbacks and frame boundary calculations |
+| `ioredis` | 5.6.1 | Redis client used by backtest-kit for inter-process caching and `Cache.fn` invalidation |
+| `mongoose` | 8.23.0 | ODM layer over MongoDB for signal and session documents |
+| `functools-kit` | 5.0.0 | Utilities including `Cache.fn` (memoization with TTL) and error helpers |
+
+<Note>
+TypeScript 5+ is a peer dependency. The CLI compiles and runs strategies directly via `ts-node`-style execution — no separate build step is required to run a backtest.
+</Note>
+
+## Infrastructure Requirements
+
+The engine requires **MongoDB** and **Redis** to be reachable before any strategy is loaded. Both are provided as Docker Compose services in the `docker/` directory:
+
+```yaml
+# docker/mongo/docker-compose.yaml
+# Starts mongodb on port 27017 with a persistent volume at ./mongo_data
+```
+
+```yaml
+# docker/redis/docker-compose.yaml
+# Starts redis:7.4.1 on port 6379 with password protection (CC_REDIS_PASSWORD in .env)
+```
+
+`config/loader.config.ts` calls `waitForInit()` from `@backtest-kit/mongo` as its default export. The CLI blocks strategy loading until this promise resolves, so a missing database produces a clear timeout rather than a cryptic runtime error.
+
+<Note>
+Candle data from Yahoo Finance is **not** written to MongoDB. The `PersistCandleAdapter.useDummy()` call in each month's `backtest.module.ts` keeps the synthesized minute candles in memory only. MongoDB stores signals, sessions, and state; Redis stores the `Cache.fn` gate value (invalidated once per day).
+</Note>
+
+## Explore Further
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install dependencies, start Docker services, and run your first monthly backtest in minutes.
+  </Card>
+  <Card title="Strategy Overview" icon="chart-line" href="/strategy/overview">
+    Understand the gate formula, allocation arithmetic, weekly cycle, and how PAXG fits in.
+  </Card>
+  <Card title="Build the Universe" icon="database" href="/tooling/build-universe">
+    Run the universe builder, ticker resolver, and verifier to regenerate month folders from scratch.
+  </Card>
+  <Card title="Design Rules" icon="ruler" href="/advanced/design-rules">
+    Copy-paste over abstraction, known approximations, and how to extend the repo honestly.
+  </Card>
+</CardGroup>

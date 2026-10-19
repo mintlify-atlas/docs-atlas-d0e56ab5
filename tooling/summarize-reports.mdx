@@ -1,0 +1,121 @@
+---
+title: "summarize_reports.mjs: Aggregate Monthly P&L Table"
+sidebarTitle: "Summarize Reports"
+description: "Reads every month's backtest.jsonl report, computes net/gross P&L, fee estimates, PAXG contribution, gate range, and cumulative equity with drawdown."
+---
+
+After running all month folders through the engine, `summarize_reports.mjs` collects the individual `backtest.jsonl` report files and produces a single consolidated table. It computes net P&L (as reported by the engine), estimates the round-trip trading costs that the engine's fee model subtracted, aggregates both by year, tracks cumulative equity from the starting deposit, and identifies the worst drawdown. It also flags any anomalies — months that did not finish, and trades that closed for a reason other than the expected weekly time exit — which are the primary diagnostic signal that something in the underlying data is wrong.
+
+## Usage
+
+```bash
+node scripts/common/summarize_reports.mjs [--deposit 1000]
+```
+
+`--deposit` sets the reference deposit used for percentage calculations. Default is `1000`. This value does not need to match the actual deposit constant in the strategy — it is only used to scale the `net%` and `gross%` columns.
+
+## Report Location
+
+For each month folder under `content/`, the script looks for the report in two places, in order:
+
+1. `content/<month>/dump/report/backtest.jsonl` — the live output location written by the engine during a run.
+2. `content/<month>/assets/backtest.jsonl` — a pre-run reference copy, used when the `dump/` tree has been cleared.
+
+If neither file exists, the month is shown as `(no report)` in the table.
+
+The report is a newline-delimited JSON file where each line has an `action` field (`"opened"`, `"active"`, or `"closed"`) and a `data` object. The summariser reads only `opened` and `closed` rows.
+
+## Per-Month Output Columns
+
+```
+month    opened closed  net$     net%   fees$  gross%  PAXG$  gate      non-time closes
+2020-09     21     21    +42   +4.2%     18    +5.9%    +12  0.33..0.67
+```
+
+| Column | Description |
+|--------|-------------|
+| `month` | YYYY-MM — the calendar month this folder covers |
+| `opened` | Number of `opened` rows in the report (one per signal entered) |
+| `closed` | Number of `closed` rows in the report (one per signal exited) |
+| `net$` | Sum of `pnlCost` across all closed signals — the engine's reported net profit/loss in dollars |
+| `net%` | `net$ / deposit × 100` |
+| `fees$` | Estimated round-trip costs: `sum(cost × 0.004)` across all closed signals, where 0.004 = 0.1% fee + 0.1% slippage × 2 sides |
+| `gross%` | `(net$ + fees$) / deposit × 100` — what net% would have been without the fee model |
+| `PAXG$` | Net P&L contribution from `PAXGUSDT` only — the gold counter-position |
+| `gate` | Min..max gate value seen across all opened signals (excluding PAXG), showing the range of BTC trend exposure during the month |
+| `non-time closes` | Any `closeReason` other than `time_expired`, shown as `reason:count` — each is a signal that warrants data investigation |
+
+## Per-Year Summary
+
+After the month table, the script prints a year-level aggregate:
+
+```
+year   months trades    net$    net%   fees$  gross%
+2020       4    336     +80   +8.0%     42    +12.2%
+2021      12   1212    +230  +23.0%    130    +36.0%
+```
+
+Each row sums `net$`, `fees$`, and trade count across all months of that year.
+
+## TOTAL Row
+
+The final summary row covers all months:
+
+```
+TOTAL    73   5400   +1840  +184.0%   920   +276.0%   (6.1 years: net 30.2%/y simple, gross 45.2%/y)
+```
+
+Annualised figures are computed as simple (non-compounding) averages:
+
+```
+annualised net%  = total net$  / deposit / years × 100
+annualised gross% = (total net$ + total fees$) / deposit / years × 100
+```
+
+where `years = number of months / 12`.
+
+## Cumulative P&L and Drawdown
+
+After the table, the script prints a timeline-based cumulative equity line. All closed signals across all months are sorted by `closeTime` and replayed in order against the starting deposit:
+
+```
+cumulative P&L: final 2840, peak 3100, max drawdown -260$ (-8% of peak) at 2022-11-14
+```
+
+| Value | Description |
+|-------|-------------|
+| `final` | Ending equity (deposit + all closed `pnlCost` values) |
+| `peak` | Highest equity reached at any point during the backtest |
+| `max drawdown` | Largest dollar decline from a peak, and its percentage of that peak |
+| `at` | Date (from `closeTime`) of the trade that set the maximum drawdown |
+
+## Diagnosing Problems
+
+### `opened != closed`
+
+If a month's `opened` and `closed` counts differ, the engine was interrupted before the month completed. The partial report is unusable for P&L purposes. Rerun that month:
+
+```bash
+npm start -- --backtest --entry ./content/<month>/main.strategy.ts
+```
+
+The summary flags this inline as `OPEN!=CLOSED`.
+
+### Non-time close reasons
+
+Every trade in this strategy is expected to exit as `time_expired` (the weekly time limit). If any `closeReason` other than `time_expired` appears, it means a stop or take-profit was hit — which at −50% / +500% levels should be impossible on spot in one week under normal conditions. These are printed in the `non-time closes` column and listed individually at the end of the output:
+
+```
+3 closes not by time (check the data behind them):
+  2021-05 BTCUSDT       stop_loss     pnl  -51.2%  open 58000.0 close 28000.0
+```
+
+The most common cause is a corrupt bar in the Yahoo data — a zero, a spurious spike, or a gap — that the engine's anomaly filler did not fully suppress. Investigate the candle history for that symbol and month.
+
+### Missing report
+
+A month shown as `(no report)` has not been run yet (or its output has been moved/deleted). Run it individually or re-run the full runner script.
+
+<Note>
+The `fees$` column is an **estimate** derived from the engine's default fee and slippage parameters (`CC_PERCENT_FEE = 0.001`, `CC_PERCENT_SLIPPAGE = 0.001`, two sides). The `pnlCost` values in the report are already net of these costs, so `fees$` represents what was deducted — not an additional charge. If you modified `setConfig` to use different fee or slippage values, the `fees$` estimate will be wrong, but `net$` will still be correct. Pass `--deposit` to re-scale the percentage columns if your actual deposit differed from the default 1000.
+</Note>

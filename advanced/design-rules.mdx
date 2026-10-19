@@ -1,0 +1,131 @@
+---
+title: "Design Rules and Architecture Principles"
+sidebarTitle: "Design Rules"
+description: "The five explicit design rules that govern the repo: copy-paste over abstraction, setConfig only in strategy, constants over tuning, and reproducibility guarantees."
+---
+
+These rules are not stylistic preferences. They are enforced by structure and exist to protect reproducibility: the requirement that any month folder, run in isolation today, produces the same result it produced the day it was first run. Violating a rule does not produce a compile error — it produces a backtest that silently produces different numbers than the original.
+
+<AccordionGroup>
+
+<Accordion title="Rule 1: Copy-paste over abstraction">
+
+Months are stamped, not imported. The generator copies the reference folder (`content/sep_2020/`) in its entirety and substitutes exactly three things: the basket block in the strategy, the ticker overrides block, and the frame in the exchange module. No code is shared between month folders.
+
+**Why this matters:**
+
+- A refactor to a shared module must not change the result of a month that already ran and was validated. With copy-paste, there is nothing to refactor across months — each folder compiles and runs independently with only `backtest-kit` and `typescript` as external dependencies.
+- If a bug is found in `classes/YahooFinance.ts`, fixing it in the reference month and regenerating only affects future runs of regenerated months. Past results stored in `dump/report/backtest.jsonl` remain from the original code.
+- The generator is the **only** tool that touches multiple folders. No build script, no shared module, no barrel export.
+
+**In practice:**
+
+Each `content/<month>/` folder contains its own copy of:
+
+| File | Role |
+|---|---|
+| `main.strategy.ts` | Constants, gate logic, allocation, launcher — `setConfig` lives only here |
+| `classes/YahooFinance.ts` | Yahoo Finance daily candle fetcher |
+| `modules/backtest.module.ts` | Symbol → Yahoo ticker mapping, exchange schema, month frame |
+
+</Accordion>
+
+<Accordion title="Rule 2: setConfig only in the strategy file">
+
+`setConfig` appears **only** in `main.strategy.ts`. No other file in the folder calls it.
+
+The exchange module (`modules/backtest.module.ts`) registers schemas and adapters — `addExchangeSchema`, `addFrameSchema`, `PersistCandleAdapter.useDummy()` — but it does not change engine behaviour. It does not call `setConfig`.
+
+The global persistence configuration in `config/setup.config.ts` sets choices like Dump, Session, and Storage adapters but does not call `setConfig` either.
+
+**Why this matters:**
+
+When reading a month's strategy file to understand its behaviour, you can read its `setConfig` call and know with certainty what the engine was configured to do. If `setConfig` could be called from anywhere in the module graph, you would need to trace all imports to find the effective configuration. For a 73-folder repo, that becomes unmanageable.
+
+**From `content/apr_2021/main.strategy.ts`:**
+
+```typescript
+setConfig({
+  CC_MAX_STOPLOSS_DISTANCE_PERCENT: 100, // allows the technical stop of -50%
+  CC_BACKTEST_STEP_MINUTES: 24 * 60,     // one engine step per daily bar
+});
+```
+
+This is the only `setConfig` call in the entire folder.
+
+</Accordion>
+
+<Accordion title="Rule 3: Constants describe the process, not the outcome">
+
+Every constant in `main.strategy.ts` has a non-PnL reason for its value:
+
+| Constant | Value | Reason |
+|---|---|---|
+| `GATE_WINDOWS_DAYS` | `[20, 25, 30, 35, 40, 45]` | A plateau of lookbacks found before this repo existed. Results within the plateau do not depend on which N you pick. A single moving average is a knife-edge parameter; an ensemble across the plateau is not. |
+| `HOLD_MINUTES` | `7 * 24 * 60 - 1` | One calendar week. The minus-one-minute detail places the close at 23:59 so the re-entry tick lands at 00:00 without an extra hour in the cache. |
+| `BASKET` filter age | 90 days | A liquidity requirement: tokens listed fewer than 90 days before the month starts are excluded because their early trading history is thin and their Yahoo prices are frequently anomalous. |
+| `STOP_LOSS_PERCENT` | `50` | A technical level, not a risk target. A spot position cannot lose 50% in one week without leverage; the stop exists only to satisfy the engine's bracket validator. |
+| `TAKE_PROFIT_PERCENT` | `500` | Same — a technical ceiling the strategy will never hit in normal operation. |
+
+**Why this matters:**
+
+None of these values is tuned to a PnL curve. The README does not quote any PnL number. If a constant were fitted to historical returns, changing the basket construction for a new month would immediately invalidate the rationale. The constants mean the same thing in 2020 and in 2026.
+
+</Accordion>
+
+<Accordion title="Rule 4: Every approximation is written down">
+
+`docs/HOWTO.md` is the operating manual for known gaps and trade-offs. It documents:
+
+- The daily-bar sampling approximation and when it matters
+- The per-symbol portfolio accounting model and its implications
+- The weekly leg desynchronisation between the gold leg and the basket legs
+- Yahoo Finance aggregate prices, discontinuities at token migrations, and low-precision tickers
+- The fixed deposit / no-compounding design choice
+
+The README does not quote any PnL numbers. This is a direct consequence of the rule: quoting a number that depends on approximations without documenting the approximations would be misleading.
+
+**Why this matters:**
+
+A user running the strategy for the first time should be able to understand every gap between the simulation and a real execution. If an approximation is not written down, it is invisible — and an invisible approximation is indistinguishable from a bug.
+
+When a new approximation is introduced (for example, a change to how anomalous bars are repaired), it is added to `docs/HOWTO.md` before the change is merged.
+
+</Accordion>
+
+<Accordion title="Rule 5: The reference month is the only place strategy is edited by hand">
+
+Strategy logic lives in `content/sep_2020/main.strategy.ts`. This is the **only** file that is edited by hand when the strategy changes. After editing, the generator is re-run:
+
+```bash
+node scripts/common/generate_months.mjs --source content/sep_2020
+```
+
+The generator then propagates the change to every other month folder, substituting each month's specific basket block, ticker overrides, and frame. Individual month files must **never** be hand-edited after generation.
+
+**Why this matters:**
+
+If you hand-edit `content/apr_2021/main.strategy.ts` to fix a bug, the fix is invisible to every other month. The next generator run will overwrite it. More importantly, the fix now introduces an asymmetry: April 2021 ran with one version of the logic, every other month ran with another. The results are no longer comparable.
+
+**The correct workflow for changing the strategy:**
+
+1. Edit `content/sep_2020/main.strategy.ts` (the reference month)
+2. Run `node scripts/common/generate_months.mjs --source content/sep_2020`
+3. Optionally re-run affected months to update their reports
+4. Commit the entire `content/` tree together
+
+</Accordion>
+
+</AccordionGroup>
+
+## Why this architecture
+
+The central requirement is that months must be independently reproducible. If you run `content/apr_2021/main.strategy.ts` today and it produces a different result than it did in 2021, you cannot trust any comparison between months — the one that changed is now on a different version of the logic than the ones that did not.
+
+Shared code is the most common way to violate this. A refactor to a shared module that changes behaviour (even a well-intentioned one) immediately invalidates every month that depends on it. Copy-paste severs this dependency entirely: each folder is a snapshot of the code as it was when that month ran, and nothing can change it after the fact except an intentional re-generation.
+
+This is not a claim that copy-paste is generally better than abstraction. It is a claim that for a research repository where the primary artefact is a historical PnL sequence, reproducibility of each month's result matters more than code reuse across months.
+
+<Tip>
+When running a specific historical period for the first time — for example, to verify a single quarter — run only those months' scripts individually rather than the full runner. The full runner (`bash scripts/linux/generate_strategy.sh`) runs every month in chronological order and will overwrite existing reports. Running individual months lets you inspect their output before committing to a full regeneration.
+</Tip>

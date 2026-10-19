@@ -1,0 +1,61 @@
+---
+title: "Multi-Asset Portfolio Strategy with Risk Parity"
+sidebarTitle: "Multi-Asset"
+description: "A separate content/multi_asset/ strategy backtests BTC, gold, S&P 500, and TLT with equal-risk-contribution weights and the same BTC trend gate."
+---
+
+The multi-asset variant is a separate folder (`content/multi_asset/`) that runs a single long frame from 2015 onward on four instruments, one per asset class. It follows the same copy-paste architecture as the monthly index fund folders — the same `YahooFinance` candle fetcher, the same exchange adapter pattern, and the same BTC trend gate — but instead of an equal-weight basket of altcoins, the allocation is determined by an equal-risk-contribution weighting derived from 90-day realized covariances.
+
+## The four instruments
+
+Each instrument represents a distinct asset class:
+
+| Symbol | Asset class | Source ticker |
+|---|---|---|
+| `BTCUSD` | Cryptocurrency | `BTC-USD` on Yahoo Finance |
+| `GOLD` | Precious metals | `GC=F` — COMEX gold futures |
+| `SPX` | Equities | `^GSPC` — S&P 500 index |
+| `TLT` | Long-duration bonds | `TLT` — iShares 20+ Year Treasury Bond ETF |
+
+The four instruments are defined directly in `content/multi_asset/main.strategy.ts` and `content/multi_asset/modules/backtest.module.ts`, using the same `TICKER_OVERRIDES` pattern that the monthly folders use to map strategy symbols to Yahoo Finance tickers.
+
+## Risk-parity weighting
+
+Rather than dividing the deposit equally by instrument count, the multi-asset strategy sizes each leg so that every instrument contributes the same amount of risk to the portfolio. Weights are derived from the **equal risk contribution (ERC)** principle, using the covariance matrix of 90-day daily returns:
+
+1. The strategy fetches 90 daily bars for all four instruments and computes the sample covariance matrix.
+2. ERC weights are solved so that each leg's marginal risk contribution — `w_i × (Σw)_i` — is equal across all four instruments.
+3. The **crypto leg** (BTC) is additionally multiplied by the same BTC trend gate used in the monthly index fund: the share of the six windows (20, 25, 30, 35, 40, 45 days) on which Bitcoin closed higher.
+4. The fraction released from the crypto leg when the gate is below 1 is **redistributed proportionally** among the remaining three asset classes (GOLD, SPX, TLT), preserving their relative ERC weights.
+
+This means the portfolio is always fully invested: when BTC is in a downtrend and the gate is 0, the entire deposit flows into the three non-crypto instruments at their ERC weights. When the gate is 1, all four instruments are held at their ERC weights.
+
+## How to run
+
+```bash
+npm start -- --backtest --entry ./content/multi_asset/main.strategy.ts
+```
+
+This runs a single backtest process covering the full frame from 2015 to the present. Because `CC_BACKTEST_STEP_MINUTES` is set to `24 * 60`, the engine evaluates each position once per day — eleven years pass in a matter of minutes.
+
+## Data setup
+
+The multi-asset folder uses the exact same Yahoo Finance adapter pattern as the monthly index fund:
+
+- **`classes/YahooFinance.ts`** fetches daily bars from the Yahoo Finance chart API on demand — no API key, no ccxt, one HTTP request per ticker covering the full 15-year history.
+- **`getCandlesFilled`** handles `1d` interval requests: it places bars on a continuous calendar grid and repairs weekends, holidays, and anomalous bars (zeros, hundredfold wicks) with a flat bar derived from neighbouring closes.
+- **`getCandlesSampled`** handles all intervals shorter than one day by repeating the repaired daily bar across its constituent minutes or hours. There is no intraday price movement.
+- **`PersistCandleAdapter.useDummy()`** keeps the synthesized candles out of MongoDB. The report retains only `opened` and `closed` rows.
+- **`CC_BACKTEST_STEP_MINUTES: 24 * 60`** is set in the strategy's `setConfig` call so the engine evaluates positions once per daily bar rather than 1 440 times on identical candles.
+
+## Frame
+
+The backtest covers a single long frame starting in 2015, defined in `content/multi_asset/modules/backtest.module.ts` via `addFrameSchema`. There is no per-month partitioning — the entire multi-asset history is one continuous run, unlike the monthly index fund which splits execution across 73 separate folder processes.
+
+## Availability
+
+The `content/multi_asset/` folder is not yet present in the repository. It follows the same structural pattern as every other `content/<month>/` folder and can be created manually or with a variant of the generator by pointing `--source` at a multi-asset reference folder. The data setup, adapter pattern, and `setConfig` requirements documented above are derived from `docs/HOWTO.md`.
+
+<Note>
+**Known limitation — sampled daily-bar intraday path.** `getCandlesSampled` copies the daily bar's high, low, and close into every minute of that day. At the start of the day, the engine already "knows" the day's high and low. For weekly time-exit positions this does not affect results — positions are never stopped out intraday, and the technical stop of −50% is unreachable in one day on spot. For intraday stop strategies this approximation would produce incorrect stop-outs.
+</Note>

@@ -1,0 +1,83 @@
+---
+title: "Data Pipeline: Yahoo Finance Daily Bars to Minute Engine"
+sidebarTitle: "Data Pipeline"
+description: "How daily Yahoo Finance OHLCV bars are sampled into the minute-resolution feed that backtest-kit expects, and what trade-offs that involves."
+---
+
+backtest-kit simulates positions on a minute-resolution candle feed. Every tick of the engine corresponds to one minute of simulated time, and positions are evaluated against the OHLCV data for each minute. The challenge: Yahoo Finance, the candle source used by this project, only provides **daily bars**. There is no intraday history for crypto on Yahoo, and the free API does not support sub-daily intervals beyond the most recent 60 days. The data pipeline's job is to bridge that gap — turning one daily bar into the minute-resolution feed the engine expects — without introducing look-ahead or slowing the backtest to a crawl.
+
+## The Adapter
+
+Each month's `modules/backtest.module.ts` registers a custom exchange schema that plugs the Yahoo Finance fetcher into the engine's candle pipeline:
+
+```typescript
+addExchangeSchema({
+  exchangeName: 'yahoo-finance',
+  getCandles: async (symbol, interval, since, limit) =>
+    await getCandlesSampled(fetchOHLCV, { symbol, interval, since, limit }),
+});
+PersistCandleAdapter.useDummy();
+```
+
+`fetchOHLCV` is a thin wrapper around `YahooFinance.getCandles` that first translates the Binance-style symbol (`BTCUSDT`) to its Yahoo ticker (`BTC-USD`) via the `tickerOf` function, then delegates to the Yahoo Finance HTTP client.
+
+`getCandlesSampled` is a backtest-kit utility that handles the daily-to-minute translation:
+
+- For `1d` interval requests (used by `getGate` and any other daily-resolution queries inside the strategy), it calls `getCandlesFilled` on the raw Yahoo bars. This function puts the bars on a continuous calendar grid and repairs any gaps or anomalies before returning them.
+- For sub-daily intervals (`1h`, `1m`, etc., used by the engine when evaluating positions), it repeats the repaired daily bar across every minute or hour in that day. Every minute within a given day carries that day's OHLCV values — the open, high, low, and close are constant within the day.
+
+## Step Size Optimisation
+
+Because every minute of a day carries identical candle data, evaluating positions 1,440 times per day produces no new information. The strategy takes advantage of this with a single config option:
+
+```typescript
+setConfig({
+  CC_BACKTEST_STEP_MINUTES: 24 * 60,
+});
+```
+
+This tells the engine to advance in steps of one full day (1,440 minutes) rather than one minute at a time. Positions are still tracked with minute-level timestamps and close correctly by `minuteEstimatedTime`, but the evaluation loop runs once per day instead of 1,440 times on identical candles. The practical effect: a full 73-month backtest across 21 symbols completes in minutes rather than hours.
+
+The strategy's tick cadence (defined by `interval: "1h"` in `addStrategySchema`) is unaffected. `getSignal` is still called on hourly ticks, so weekly re-entry happens precisely at 00:00 on the day after each position expires.
+
+## Bar Repair
+
+Yahoo Finance daily bars have several known reliability problems that `getCandlesFilled` handles automatically:
+
+- **Weekend and holiday gaps** — markets (especially traditional-finance assets like PAXG) do not trade on weekends. `getCandlesFilled` fills those gaps with a flat bar derived from the neighbouring session's closes, keeping the grid continuous.
+- **Anomalous bars** — occasional bars with zero prices, or with a high or low that is wildly inconsistent with the surrounding price history (e.g., a hundred-fold spike or collapse), are detected and replaced with a flat bar from the neighbours.
+
+The thresholds that govern anomaly detection are controlled by two engine environment variables:
+
+| Variable | Role |
+|---|---|
+| `CC_GET_CANDLES_PRICE_ANOMALY_THRESHOLD_FACTOR` | Maximum ratio between a bar's price and its neighbours before it is flagged as anomalous. |
+| `CC_GET_CANDLES_MAX_ANOMALY_STREAK` | Maximum number of consecutive anomalous bars that will be repaired; a longer streak aborts the run rather than silently filling a large gap. |
+
+These defaults are set by the engine and can be overridden in `.env` if a particular asset has unusual but legitimate volatility.
+
+## Yahoo Ticker Mapping
+
+Binance symbols use the form `BASEUSDT` (e.g., `BTCUSDT`, `ADAUSDT`). Yahoo Finance tickers for the same assets are typically `BASE-USD` (e.g., `BTC-USD`, `ADA-USD`). The `tickerOf` function in `backtest.module.ts` applies this transformation automatically:
+
+```typescript
+const TICKER_OVERRIDES: Record<string, string> = {
+};
+
+const tickerOf = (symbol: string): string =>
+  TICKER_OVERRIDES[symbol] ?? symbol.replace(/USDT$/, "-USD");
+```
+
+`TICKER_OVERRIDES` is a per-month exception table for assets where the default mapping is wrong. Some tokens share their three-letter name with an older, unrelated asset on Yahoo — for example, a token listed on Binance as `APEXUSDT` might map to the wrong `APEX-USD` series. The `resolve_yahoo_tickers.mjs` script discovers these collisions by searching the Yahoo API and records the correct ticker (often with a numeric suffix such as `APE23980-USD`) in `scripts/common/yahoo_tickers.json`. The generator then injects the right overrides into each month's `backtest.module.ts` when it stamps the folder.
+
+## Mongo and Candles
+
+```typescript
+PersistCandleAdapter.useDummy();
+```
+
+By default backtest-kit writes every fetched candle batch to MongoDB so subsequent runs can skip the HTTP requests. For this project that behaviour is disabled: the synthesized minute candles would consume a large amount of storage and provide no benefit, since they are generated deterministically from the Yahoo daily bars on demand. Calling `PersistCandleAdapter.useDummy()` replaces the real Mongo adapter with a no-op, so only signals and backtest state are persisted. MongoDB is still required (the engine waits for its connection at startup), but the candle collections stay empty.
+
+<Note>
+The daily-bar sampling introduces accepted trade-offs that affect certain strategies but not this one. See [Known Limitations](/advanced/known-limitations) for a full discussion — including why the synthetic intraday path is harmless for a weekly time-exit strategy but would matter for intraday stop-loss strategies.
+</Note>

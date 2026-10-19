@@ -1,0 +1,99 @@
+---
+title: "build_universe.mjs: Rank Binance Pairs by Volume"
+sidebarTitle: "Build Universe"
+description: "Fetches monthly OHLCV for all Binance USDT spot pairs, ranks them by prior-month volume, applies survivorship filters, and writes universe.json."
+---
+
+`build_universe.mjs` is the first step in the pipeline. It pulls monthly OHLCV data for every USDT spot pair on Binance, ranks them by the **previous** calendar month's quote volume, applies a set of survivorship filters, and writes the result to `scripts/common/universe.json`. The file is then consumed by `generate_months.mjs`, which stamps one `content/<mon>_<yyyy>/` folder per month. Because ranking uses only information available before the month starts, there is no look-ahead: the basket of each month is frozen from data that was already public on the first day of that month.
+
+## Usage
+
+```bash
+node scripts/common/build_universe.mjs [--top 20] [--from 2020-09] [--to 2026-09] [--refresh]
+```
+
+Run from the repository root.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--top` | `20` | Number of coins per month basket |
+| `--from` | `2020-09` | First month to include (YYYY-MM) |
+| `--to` | `2026-09` | Last month to include (YYYY-MM) |
+| `--refresh` | — | Re-download Binance monthly candles, ignoring the cache in `tmp/` |
+
+## What It Fetches
+
+The script initialises a `ccxt` Binance client and loads the full spot market list. It then fetches monthly (`1M`) OHLCV candles for every USDT-quoted spot pair — roughly 700 network requests. Each candle row is stored as `[timestamp, close, quoteVolume]`.
+
+Results are cached in `tmp/binance_monthly_usdt.json` (the `tmp/` directory is `.gitignore`d). Subsequent runs read from the cache unless `--refresh` is passed. The cached file is also required by `verify_yahoo_tickers.mjs` for its Binance price comparisons.
+
+## Filters Applied
+
+After fetching, the script discards symbols that would introduce noise or duplicated exposure before ranking:
+
+**Stablecoins, fiat, and synthetic USD tokens** — removed via the `STABLE_OR_FIAT` regex, which covers:
+`USDT`, `USDC`, `BUSD`, `TUSD`, `FDUSD`, `DAI`, `USDP`, `UST`, `USTC`, `EUR`, `GBP`, `AUD`, `TRY`, `BRL`, `RUB`, `UAH`, `BIDR`, `NGN`, `ZAR`, `PLN`, `RON`, `ARS`, `MXN`, `COP`, `IDR`, `KZT`, `AED`, `USD`, `JPY`, `USD1`, `XUSD`, `USDE`, `USDS`, `FRAX`, `LUSD`, `GUSD`, `USDD`, `PYUSD`, `EURI`, `AEUR`, `SUSD`, `BKRW`, `VAI`, `BVND`, `PAX`, `USDSB`, `USDQ`, `RLUSD`, `USDY`, `BFUSD`.
+
+**Leveraged tokens** — any base asset with a `UP`, `DOWN`, `BULL`, or `BEAR` suffix.
+
+**Wrapped tokens, staking derivatives, and parking assets** — removed via the `WRAPPED_OR_PARKING` regex:
+`WBTC`, `WBETH`, `BETH`, `STETH`, `WSTETH`, `CBETH`, `RETH`, `BNSOL`, `BBSOL`, `JITOSOL`, `MSOL`, `PAXG`, `XAUT`, `BTCST`, `BTCB`, `RENBTC`, `TBTC`, `SBTC`, `WETH`, `ETHW`, `BNBX`.
+
+**Listing age** — a coin must have had its first monthly candle on Binance at least **90 days** before the basket month starts. This ensures the basket only contains coins with enough price history to evaluate.
+
+Additionally, any coin that is mapped to `null` in `yahoo_tickers.json` (no Yahoo Finance data available) is excluded. Coins whose Yahoo history begins less than 7 days before the month start are also excluded, since the candle source would be unable to fill the month's bars.
+
+## Output
+
+`scripts/common/universe.json` — one entry per month under the `months` key:
+
+```json
+{
+  "generatedAt": "2025-01-01T00:00:00.000Z",
+  "source": "Binance spot, quoteVolume of previous calendar month, 1M candles via ccxt",
+  "params": { "top": 20, "minListingDays": 90, "from": "2020-09", "to": "2026-09" },
+  "months": {
+    "2020-09": {
+      "rankedBy": "2020-08",
+      "basket": ["BTCUSDT", "ETHUSDT", "..."],
+      "volumeUsdTop1": 12345678900,
+      "volumeUsdCutoff": 987654321
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `rankedBy` | The prior month whose volume was used to rank coins |
+| `basket` | Ordered array of symbols (highest volume first, trimmed to `--top`) |
+| `volumeUsdTop1` | Quote volume of the highest-ranked coin in `rankedBy` |
+| `volumeUsdCutoff` | Quote volume of the last coin admitted to the basket |
+
+## Exit Codes
+
+If any coin that ended up in a basket has **not yet been checked** by `resolve_yahoo_tickers.mjs` (i.e. it is absent from `yahoo_tickers.json`), the script prints the list of unchecked coins and exits with **code 2**.
+
+`generate_months.mjs` checks for this condition and throws an error rather than stamping month folders with unverified data. This is not a formality: a missing Yahoo ticker in a basket causes the entire month's backtest run to fail on its very first tick.
+
+<Note>
+**The iterative convergence workflow.** Coins that resolve to `null` in `yahoo_tickers.json` are dropped from baskets, and their slots are filled by the next-ranked coin — which itself needs to be resolved. This means the pipeline must be run in a loop until the universe stabilises:
+
+```bash
+# 1. Build the initial universe
+node scripts/common/build_universe.mjs --top 20 --from 2020-09 --to 2026-09
+
+# 2. Resolve Yahoo tickers for any unchecked coins
+node scripts/common/resolve_yahoo_tickers.mjs
+
+# 3. Repeat steps 1–2 until build_universe prints no unchecked coins (usually 2–3 cycles)
+
+# 4. Verify the resolved tickers against Binance prices
+node scripts/common/verify_yahoo_tickers.mjs
+
+# 5. If verify rejects coins, restart the loop from step 1 until clean
+
+# 6. Generate all month folders
+node scripts/common/generate_months.mjs --source content/sep_2020
+```
+</Note>

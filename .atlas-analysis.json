@@ -1,0 +1,104 @@
+{
+  "projectType": "general",
+  "projectName": "Backtest Index Fund",
+  "projectDescription": "A monthly-regenerated weekly crypto index fund backtester built on backtest-kit: $1,000 split equally across the top-20 Binance USDT pairs by prior-month volume, market exposure scaled by a BTC trend gate, and the remainder parked in PAXG gold — replayed month by month from September 2020.",
+  "theme": "luma",
+  "primaryColor": "#1f70c2",
+  "lightColor": null,
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Strategy",
+            "pages": [
+              "strategy/overview",
+              "strategy/gate",
+              "strategy/allocation",
+              "strategy/data"
+            ]
+          },
+          {
+            "group": "Scripts & Tooling",
+            "pages": [
+              "tooling/build-universe",
+              "tooling/resolve-verify",
+              "tooling/generate-months",
+              "tooling/summarize-reports"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/multi-asset",
+              "advanced/design-rules",
+              "advanced/known-limitations"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Reference",
+        "groups": [
+          {
+            "group": "Configuration",
+            "pages": [
+              "reference/setconfig",
+              "reference/environment"
+            ]
+          },
+          {
+            "group": "Module Reference",
+            "pages": [
+              "reference/main-strategy",
+              "reference/backtest-module",
+              "reference/yahoo-finance-class"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Monthly self-contained strategy folders — no shared code between months, full reproducibility",
+    "BTC trend gate: ensemble vote of six lookback windows (20–45 days) scales basket exposure from 0 to 1",
+    "PAXG gold counter-position absorbs the fraction of the deposit the gate keeps out of crypto",
+    "Equal-weight weekly positions with time-exit after exactly one week minus one minute",
+    "Yahoo Finance daily bars sampled to the minute feed backtest-kit expects — no ccxt, no API key",
+    "Universe builder ranks Binance USDT spot pairs by prior-month volume with survivorship filters",
+    "Ticker resolver and price verifier catch Yahoo mis-mappings and anomalous price series before generation",
+    "Single script regenerates all 73 month folders from the reference month and rewrites runner scripts",
+    "Report summarizer folds all months into one table with cumulative P&L and drawdown"
+  ],
+  "publicApiSurface": [
+    "npm start -- --backtest --ui --entry ./content/<month>/main.strategy.ts",
+    "bash scripts/linux/generate_strategy.sh",
+    "scripts/win/generate_strategy.bat",
+    "node scripts/common/build_universe.mjs [--top 20] [--from YYYY-MM] [--to YYYY-MM] [--refresh]",
+    "node scripts/common/resolve_yahoo_tickers.mjs",
+    "node scripts/common/verify_yahoo_tickers.mjs [--only SYM1,SYM2]",
+    "node scripts/common/generate_months.mjs [--source content/sep_2020]",
+    "node scripts/common/summarize_reports.mjs [--deposit 1000]",
+    "addStrategySchema({ strategyName, interval, getSignal })",
+    "addLauncherSchema({ launcherName, backtest, symbolList, cache })",
+    "addExchangeSchema({ exchangeName, getCandles })",
+    "addFrameSchema({ frameName, interval, startDate, endDate, note })",
+    "Cache.fn(fn, { interval })",
+    "getCandles(symbol, interval, limit)",
+    "getCandlesSampled(fetchOHLCV, { symbol, interval, since, limit })",
+    "Position.bracket({ position, currentPrice, percentStopLoss, percentTakeProfit })",
+    "PersistCandleAdapter.useDummy()",
+    "listenDoneBacktest(callback)",
+    "setConfig({ CC_BACKTEST_STEP_MINUTES, CC_MAX_STOPLOSS_DISTANCE_PERCENT, ... })",
+    "YahooFinance.getCandles(ticker, interval, since, limit)"
+  ]
+}

@@ -1,0 +1,111 @@
+---
+title: "How the Weekly Index Fund Strategy Works"
+sidebarTitle: "Overview"
+description: "A complete walkthrough of the index fund strategy: basket selection, BTC trend gate, PAXG counter-position, weekly cycle, and the one-folder-per-month architecture."
+---
+
+The strategy backtests a weekly long-only crypto index fund across every month from September 2020 onward. A fixed deposit of $1,000 is split equally across up to twenty of the most-traded Binance USDT pairs of the prior calendar month. A BTC-based trend gate then scales that split: when Bitcoin momentum is strong the full deposit goes into crypto; as it weakens, the unallocated fraction moves into tokenized gold (PAXG). Every position lives exactly one week, closes by time expiry, and is immediately reopened on the next tick at whatever size the gate dictates that day. The whole strategy lives in one self-contained TypeScript file per month — there is no shared code between months and no look-ahead into data that was not available on the first day of the month.
+
+## The Basket
+
+Each month's basket is the top-20 Binance USDT spot pairs by quote volume of the **previous** calendar month, subject to three filters applied before the month starts:
+
+1. **Listing age ≥ 90 days** — newly listed tokens are excluded; the pair must have been trading long enough to have an established market.
+2. **No stablecoins, fiat pairs, leveraged tokens, or BTC/ETH wrappers/staked derivatives** — only genuine spot exposure to distinct assets.
+3. **Available on Yahoo Finance for the full month** — pairs whose candle history is absent or starts too late are replaced by the next pair down the volume ranking.
+
+The ranking uses only information available on the first day of the month — last month's volume data — so there is no survivorship bias. Coins that were liquid in 2021 but delisted later are in the baskets of the months when they were actually liquid. This year's memecoins are not retroactively inserted into 2021.
+
+The basket is a plain constant in each month's `main.strategy.ts`, delimited by comment markers so the generator can substitute it:
+
+```typescript
+// BASKET:BEGIN
+// April 2021: top-20 Binance USDT spot pairs by March 2021 volume (known before month start),
+// listing age ≥ 90 days, no stablecoins, leveraged tokens or BTC/ETH wrappers.
+const BASKET = [
+  "BTCUSDT",
+  "ETHUSDT",
+  "BNBUSDT",
+  "CHZUSDT",
+  "ADAUSDT",
+  // … up to 20 symbols
+];
+// BASKET:END
+```
+
+Because this block is the only thing that differs between two months' strategy files, re-running the generator cannot accidentally change the logic of a month that already ran.
+
+## The Weekly Cycle
+
+Each symbol in `SYMBOL_LIST` (the basket plus `PAXGUSDT`) opens a long bracket position at the start of each week and closes it by time expiry. The three key constants are:
+
+```typescript
+const HOLD_MINUTES = 7 * 24 * 60 - 1;
+const STOP_LOSS_PERCENT = 50;
+const TAKE_PROFIT_PERCENT = 500;
+```
+
+`HOLD_MINUTES` is one week minus one minute. The position closes at 23:59 so that the engine processes the time-exit event before the 00:00 hourly tick that opens the next week. This avoids holding a stale position for an extra hour while a new signal for the same symbol is generated.
+
+The stop-loss (−50 %) and take-profit (+500 %) are intentionally set far beyond anything a spot position can reach in a single week. They exist only because the engine's validator requires bracket levels; the only normal exit is `closeReason: "time_expired"`. Any position that does *not* close by time is flagged in the monthly summary report as a data anomaly to investigate.
+
+The strategy interval is `1h`, so the re-entry tick fires at 00:00 on the day after expiry. Because the gate is re-evaluated on that tick from the freshest closed daily bar, the new position immediately reflects the current week's gate value.
+
+## The Deposit
+
+```typescript
+const DEPOSIT_USD = 1000;
+```
+
+The $1,000 deposit is split at the start of each weekly position according to the gate value computed that day. Each basket symbol receives:
+
+```
+cost = (DEPOSIT_USD / BASKET.length) * gate
+```
+
+PAXG, the parking symbol, receives the complementary fraction:
+
+```
+cost = DEPOSIT_USD * (1 - gate)
+```
+
+When the gate is 1 (all six BTC windows are up), every dollar goes into crypto and no PAXG signal is emitted. When the gate is 0, every dollar goes to PAXG and all crypto signals return `null`. At intermediate gate values the deposit is split proportionally, so the total capital deployed is always $1,000 in expectation — it is never idle in cash.
+
+## Signal Payload
+
+Every opened signal carries a structured `payload` field so the report is self-documenting:
+
+```typescript
+payload: { gate, weight, basketSize: BASKET.length }
+```
+
+| Field | Description |
+|---|---|
+| `gate` | The BTC trend gate value at the time the position was opened (0–1 in steps of 1/6). |
+| `weight` | The fraction of the deposit allocated to this symbol (`cost / DEPOSIT_USD`). |
+| `basketSize` | The number of symbols in the basket for this month (always 20 for complete months). |
+
+The human-readable `note` field on the signal records the same information in one line:
+
+```
+BTCUSDT gate=0.83 cost=$41.67
+```
+
+Use these fields when analysing the JSONL report to filter positions by regime or to verify that allocation arithmetic matches expectations.
+
+## More Detail
+
+<CardGroup cols={2}>
+  <Card title="BTC Gate" href="/strategy/gate">
+    How the six-window ensemble gate is computed, cached, and interpreted.
+  </Card>
+  <Card title="Allocation" href="/strategy/allocation">
+    Exact formula for splitting the deposit between the basket and gold.
+  </Card>
+  <Card title="Data Pipeline" href="/strategy/data">
+    How Yahoo Finance daily bars are sampled into the minute feed the engine expects.
+  </Card>
+  <Card title="Known Limitations" href="/advanced/known-limitations">
+    Accepted approximations: synthetic intraday path, per-symbol accounting, leg drift.
+  </Card>
+</CardGroup>
